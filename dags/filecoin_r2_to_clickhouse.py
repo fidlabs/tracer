@@ -20,6 +20,9 @@ CH_HTTP = os.getenv("CH_HTTP", "http://clickhouse:8123")
 CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
+# Optional: limit the number of objects to process (for testing/debugging)
+MAX_OBJECTS = int(os.getenv("MAX_OBJECTS", "0"))  # 0 means no limit
+
 SHELL = "bash"
 
 def ch():
@@ -121,11 +124,24 @@ with DAG(
         suffix = R2_GLOB.split("*")[-1] if "*" in R2_GLOB else R2_GLOB
         keys = []
         paginator = s3.get_paginator("list_objects_v2")
+        
+        print(f"Starting to list objects in bucket '{R2_BUCKET}' with prefix '{R2_PREFIX}' and suffix '{suffix}'")
+        page_count = 0
+        total_objects = 0
+        matching_objects = 0
+        
         for page in paginator.paginate(Bucket=R2_BUCKET, Prefix=R2_PREFIX):
-            for obj in page.get("Contents", []):
+            page_count += 1
+            page_objects = page.get("Contents", [])
+            total_objects += len(page_objects)
+            
+            print(f"Processing page {page_count}, found {len(page_objects)} objects (total so far: {total_objects})")
+            
+            for obj in page_objects:
                 k = obj["Key"]
                 if suffix and not k.endswith(suffix):
                     continue
+                matching_objects += 1
                 lm = obj["LastModified"]
                 if hasattr(lm, "timestamp"):
                     lm_ts = datetime.fromtimestamp(lm.timestamp(), tz=timezone.utc)
@@ -137,6 +153,17 @@ with DAG(
                     "size": int(obj.get("Size", 0)),
                     "last_modified": lm_ts.isoformat()
                 })
+                
+                # Check if we've hit the limit
+                if MAX_OBJECTS > 0 and matching_objects >= MAX_OBJECTS:
+                    print(f"Hit MAX_OBJECTS limit of {MAX_OBJECTS}, stopping pagination")
+                    break
+            
+            # Break outer loop if we hit the limit
+            if MAX_OBJECTS > 0 and matching_objects >= MAX_OBJECTS:
+                break
+        
+        print(f"Completed listing: {page_count} pages, {total_objects} total objects, {matching_objects} matching files")
         return keys
 
     @task
