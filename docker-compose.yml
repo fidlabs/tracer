@@ -4,15 +4,15 @@ x-airflow-env: &airflow-env
   AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
   AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-  _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
-  _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+  
   # R2 (S3-compatible) configuration for DAG
   R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
   R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
   R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
   R2_BUCKET: ${R2_BUCKET}
   R2_PREFIX: ${R2_PREFIX:-}
-  R2_GLOB: ${R2_GLOB:-*.jsonl}         # or *.json if you have one-object-per-line
+  R2_GLOB: ${R2_GLOB:-*.json.s2}
+  
   # Optional: build an Airflow "aws_r2" connection automatically (UI also works)
   AIRFLOW_CONN_AWS_R2: >-
     aws://?aws_access_key_id=${R2_ACCESS_KEY_ID}&aws_secret_access_key=${R2_SECRET_ACCESS_KEY}
@@ -50,41 +50,38 @@ services:
       retries: 5
 
   airflow-init:
-    build:
-      context: ./airflow
+    build: .
     environment:
       <<: *airflow-env
-    entrypoint: >
-      bash -lc "
-      airflow db init &&
-      airflow users create --role Admin --username $${_AIRFLOW_WWW_USER_USERNAME}
-        --password $${_AIRFLOW_WWW_USER_PASSWORD} --firstname admin --lastname admin
-        --email admin@example.com || true
-      "
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+    command: bash -lc "airflow db init"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
   airflow-scheduler:
-    build:
-      context: ./airflow
+    build: .
     environment:
       <<: *airflow-env
-    command: ["bash", "-lc", "airflow scheduler"]
+    command: bash -lc "airflow scheduler"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
     depends_on:
-      - postgres
-      - airflow-init
-      - clickhouse
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
 
   airflow-webserver:
-    build:
-      context: ./airflow
+    build: .
     environment:
       <<: *airflow-env
-    command: ["bash", "-lc", "airflow webserver"]
+    command: bash -lc "airflow webserver"
     ports:
       - "8080:8080"
     volumes:
@@ -92,9 +89,12 @@ services:
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
     depends_on:
-      - postgres
-      - airflow-init
-      - clickhouse
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
 
   # Optional specialized index (OpenSearch) — enable with `--profile elastic`
   opensearch:

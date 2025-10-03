@@ -31,22 +31,21 @@ AIRFLOW_ADMIN_PASSWORD=admin  # hard coded for local test only!
 
 ### Bring up the containers
 
-First bring up the underlying stores:
+First bring up the infrastructure services:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.airflow.yml up -d postgres clickhouse
+docker compose up -d postgres clickhouse airflow-init
 ```
 
-Now WAIT for them to be healthy (check with `docker ps` - should only take a few seconds) then start the rest:
+Wait for initialization to complete, then start Airflow services:
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.airflow.yml up -d airflow-scheduler airflow-webserver
+docker compose up -d airflow-scheduler airflow-webserver
 ```
 
-### First time only: initialise airflow
+### First time only: create admin user
 
-Initialise airflow and create admin user. Note the user create rune can be run many times if you want more, but do not re-run `airflow-init` unless you actually change the schema or blow away your containers:
+Create the admin user (this command can be run multiple times):
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.airflow.yml up -d airflow-init
-docker compose -f docker-compose.yml -f docker-compose.airflow.yml exec airflow-webserver bash -lc 'airflow users create --role Admin --username admin --password admin --firstname admin --lastname admin --email admin@example.com'
+docker compose exec airflow-webserver bash -lc 'airflow users create --role Admin --username admin --password admin --firstname admin --lastname admin --email admin@example.com'
 ```
 
 ### Tear-down

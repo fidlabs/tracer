@@ -7,22 +7,14 @@ import boto3
 import clickhouse_connect
 from urllib.parse import quote
 
-# Upgrade to env-based when this works properly
-#R2_ACCOUNT_ID = os.environ["R2_ACCOUNT_ID"]
-#R2_ACCESS_KEY_ID = os.environ["R2_ACCESS_KEY_ID"]
-#R2_SECRET_ACCESS_KEY = os.environ["R2_SECRET_ACCESS_KEY"]
-#R2_BUCKET = os.environ["R2_BUCKET"]
-#R2_PREFIX = os.getenv("R2_PREFIX", "")
-#R2_GLOB = os.getenv("R2_GLOB", "*.json.s2")  # e.g. traces_*.json.s2
-#R2_ENDPOINT = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
-R2_ACCOUNT_ID = "556ea0147c469e38591bdc721cbbd13a"
-R2_ACCESS_KEY_ID = "cc2b60d9e8fb394546be7e90e836d298"
-R2_SECRET_ACCESS_KEY = "820337a5248d2c80fd1b0735bd80bb05c560921afa77edb4c4c21a992b0315a3"
-R2_BUCKET = ""
-R2_PREFIX = ""
+# Configuration from environment variables
+R2_ACCOUNT_ID = os.environ["R2_ACCOUNT_ID"]
+R2_ACCESS_KEY_ID = os.environ["R2_ACCESS_KEY_ID"]
+R2_SECRET_ACCESS_KEY = os.environ["R2_SECRET_ACCESS_KEY"]
+R2_BUCKET = os.environ["R2_BUCKET"]
+R2_PREFIX = os.getenv("R2_PREFIX", "")
 R2_GLOB = os.getenv("R2_GLOB", "*.json.s2")  # e.g. traces_*.json.s2
-R2_ENDPOINT = "https://556ea0147c469e38591bdc721cbbd13a.r2.cloudflarestorage.com"
+R2_ENDPOINT = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
 CH_HTTP = os.getenv("CH_HTTP", "http://clickhouse:8123")
 CH_HOST = os.getenv("CH_HOST", "clickhouse")
