@@ -1,0 +1,7 @@
+# ClickHouse client + S3 provider
+clickhouse-connect==0.7.18
+apache-airflow-providers-amazon==9.1.0
+boto3==1.34.162
+
+# Optional (only if you later export to OpenSearch from a DAG)
+opensearch-py==2.6.0

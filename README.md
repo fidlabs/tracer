@@ -13,7 +13,10 @@ Running the full dockerised stack is relatively modest. Just don't go crazy with
 Copy `.env-example` to `.env` and fill in your R2 access credentials:
 
 ```env
-# ---- fill these ----
+# Compose project name. Do not change this
+COMPOSE_PROJECT_NAME=fidlabs-tracer
+
+# R2 sources config
 R2_ACCOUNT_ID=<32-character R2 account ID>
 R2_ACCESS_KEY_ID=<32-character access key ID>
 R2_SECRET_ACCESS_KEY=<64-character access key>

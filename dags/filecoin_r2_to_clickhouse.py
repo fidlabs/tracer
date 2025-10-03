@@ -1,0 +1,231 @@
+from __future__ import annotations
+import os, shlex, subprocess
+from datetime import datetime, timezone
+from airflow import DAG
+from airflow.decorators import task
+import boto3
+import clickhouse_connect
+from urllib.parse import quote
+
+# Upgrade to env-based when this works properly
+#R2_ACCOUNT_ID = os.environ["R2_ACCOUNT_ID"]
+#R2_ACCESS_KEY_ID = os.environ["R2_ACCESS_KEY_ID"]
+#R2_SECRET_ACCESS_KEY = os.environ["R2_SECRET_ACCESS_KEY"]
+#R2_BUCKET = os.environ["R2_BUCKET"]
+#R2_PREFIX = os.getenv("R2_PREFIX", "")
+#R2_GLOB = os.getenv("R2_GLOB", "*.json.s2")  # e.g. traces_*.json.s2
+#R2_ENDPOINT = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+R2_ACCOUNT_ID = "556ea0147c469e38591bdc721cbbd13a"
+R2_ACCESS_KEY_ID = "cc2b60d9e8fb394546be7e90e836d298"
+R2_SECRET_ACCESS_KEY = "820337a5248d2c80fd1b0735bd80bb05c560921afa77edb4c4c21a992b0315a3"
+R2_BUCKET = ""
+R2_PREFIX = ""
+R2_GLOB = os.getenv("R2_GLOB", "*.json.s2")  # e.g. traces_*.json.s2
+R2_ENDPOINT = "https://556ea0147c469e38591bdc721cbbd13a.r2.cloudflarestorage.com"
+
+CH_HTTP = os.getenv("CH_HTTP", "http://clickhouse:8123")
+CH_HOST = os.getenv("CH_HOST", "clickhouse")
+CH_PORT = int(os.getenv("CH_PORT", "8123"))
+
+SHELL = "bash"
+
+def ch():
+    return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT)
+
+def _curl_insert(sql: str) -> str:
+    # Properly URL-encode the SQL for the ClickHouse HTTP 'query' parameter.
+    return f"{CH_HTTP}/?query={quote(sql)}"
+
+def _sql_insert_messages() -> str:
+    return """
+INSERT INTO filecoin.messages
+SELECT
+  JSONExtractString(line,'MsgCid','/')                         AS msg_cid,
+  toUInt8(JSONExtractUInt(line,'Msg','Version'))               AS msg_version,
+  JSONExtractString(line,'Msg','To')                           AS to_addr,
+  JSONExtractString(line,'Msg','From')                         AS from_addr,
+  toUInt64(JSONExtractUInt(line,'Msg','Nonce'))                AS nonce,
+  toDecimal128OrZero(JSONExtractString(line,'Msg','Value'),38) AS value_atto,
+  toUInt64(JSONExtractUInt(line,'Msg','GasLimit'))             AS gas_limit,
+  toDecimal128OrZero(JSONExtractString(line,'Msg','GasFeeCap'),38)   AS gas_fee_cap,
+  toDecimal128OrZero(JSONExtractString(line,'Msg','GasPremium'),38)  AS gas_premium,
+  toUInt32(JSONExtractUInt(line,'Msg','Method'))               AS method,
+  JSONExtractString(line,'Msg','Params')                       AS params_b64,
+  toInt32(JSONExtractInt(line,'MsgRct','ExitCode'))            AS rct_exit_code,
+  JSONExtractString(line,'MsgRct','Return')                    AS rct_return_b64,
+  toUInt64(JSONExtractUInt(line,'MsgRct','GasUsed'))           AS rct_gas_used,
+  toDecimal128OrZero(JSONExtractString(line,'GasCost','BaseFeeBurn'),38)      AS base_fee_burn,
+  toDecimal128OrZero(JSONExtractString(line,'GasCost','OverEstimationBurn'),38)AS overestimation_burn,
+  toDecimal128OrZero(JSONExtractString(line,'GasCost','MinerPenalty'),38)      AS miner_penalty,
+  toDecimal128OrZero(JSONExtractString(line,'GasCost','MinerTip'),38)          AS miner_tip,
+  toDecimal128OrZero(JSONExtractString(line,'GasCost','Refund'),38)            AS refund,
+  toDecimal128OrZero(JSONExtractString(line,'GasCost','TotalCost'),38)         AS total_cost,
+  toUInt64(JSONExtractUInt(line,'ExecutionTrace','Duration'))  AS trace_duration_ns,
+  JSONExtractString(line,'Error')                               AS trace_error,
+  now()                                                         AS ingested_at
+FROM input('line String')
+WHERE NOT EXISTS (
+  SELECT 1 FROM filecoin.messages m WHERE m.msg_cid = JSONExtractString(line,'MsgCid','/')
+)
+FORMAT LineAsString
+""".strip()
+
+def _sql_insert_subcalls() -> str:
+    return """
+INSERT INTO filecoin.subcalls
+SELECT
+  JSONExtractString(line,'MsgCid','/')                           AS parent_cid,
+  idx                                                            AS idx,
+  JSONExtractString(sub,'Msg','To')                              AS to_addr,
+  JSONExtractString(sub,'Msg','From')                            AS from_addr,
+  toUInt32(JSONExtractUInt(sub,'Msg','Method'))                  AS method,
+  toInt32(JSONExtractInt(sub,'MsgRct','ExitCode'))               AS exit_code,
+  JSONExtractString(sub,'MsgRct','Return')                       AS return_b64,
+  toUInt64(JSONExtractUInt(sub,'MsgRct','GasUsed'))              AS gas_used,
+  toUInt64(JSONExtractUInt(sub,'Duration'))                      AS duration_ns,
+  now()                                                          AS ingested_at
+FROM (
+  SELECT _line AS line,
+         JSONExtractArrayRaw(_line,'ExecutionTrace','Subcalls') AS subs
+  FROM input(' _line String ')
+)
+ARRAY JOIN subs AS sub, arrayEnumerate(subs) AS idx
+WHERE NOT EXISTS (
+  SELECT 1 FROM filecoin.subcalls s
+  WHERE s.parent_cid = JSONExtractString(line,'MsgCid','/') AND s.idx = idx
+)
+FORMAT LineAsString
+""".strip()
+
+with DAG(
+    dag_id="filecoin_r2_s2_to_clickhouse",
+    start_date=datetime(2024, 1, 1),
+    schedule=None,
+    catchup=False,
+    max_active_runs=1,
+    default_args={"owner": "data-eng", "retries": 1},
+    tags=["filecoin","r2","s2","clickhouse","exactly-once-ish"]
+) as dag:
+
+    @task
+    def init_schema():
+        with open("/opt/airflow/include/sql/00_schema.sql","r",encoding="utf-8") as f:
+            ddl = f.read()
+        c = ch()
+        for stmt in [s.strip() for s in ddl.split(";") if s.strip()]:
+            c.command(stmt)
+
+    @task
+    def list_keys() -> list[dict]:
+        """List *all* objects under prefix; filter by simple glob suffix like *.json.s2."""
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            endpoint_url=R2_ENDPOINT,
+            region_name="auto",
+        )
+        suffix = R2_GLOB.split("*")[-1] if "*" in R2_GLOB else R2_GLOB
+        keys = []
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=R2_BUCKET, Prefix=R2_PREFIX):
+            for obj in page.get("Contents", []):
+                k = obj["Key"]
+                if suffix and not k.endswith(suffix):
+                    continue
+                lm = obj["LastModified"]
+                if hasattr(lm, "timestamp"):
+                    lm_ts = datetime.fromtimestamp(lm.timestamp(), tz=timezone.utc)
+                else:
+                    lm_ts = datetime.now(timezone.utc)
+                keys.append({
+                    "key": k,
+                    "etag": obj.get("ETag","").strip('"'),
+                    "size": int(obj.get("Size", 0)),
+                    "last_modified": lm_ts.isoformat()
+                })
+        return keys
+
+    @task
+    def ingest_one(obj: dict) -> str:
+        """
+        Claim → stream/decode → insert → mark success/fail.
+        Never reprocess (key,etag) if already success.
+        """
+        key = obj["key"]
+        etag = obj["etag"]
+        size = obj["size"]
+        lm   = obj["last_modified"]
+
+        def esc(s: str) -> str:
+            return s.replace("\\", "\\\\").replace("'", "\\'")
+
+        c = ch()
+
+        # --- CLAIM (atomic insert if no success exists for same key+etag) ---
+        claim_sql = f"""
+        INSERT INTO filecoin.loaded_keys (key, etag, size_bytes, last_modified, status, attempts, last_error, first_seen, updated_at, processed_at)
+        SELECT '{esc(key)}', '{esc(etag)}', {size}, parseDateTimeBestEffort('{esc(lm)}'), 'running',
+               ifNull( (SELECT max(attempts) FROM filecoin.loaded_keys WHERE key = '{esc(key)}'), 0) + 1,
+               '', now(), now(), NULL
+        WHERE NOT EXISTS (
+            SELECT 1 FROM filecoin.loaded_keys
+            WHERE key = '{esc(key)}' AND etag = '{esc(etag)}' AND status = 'success'
+        )
+        """
+        inserted = c.command(claim_sql)  # returns rows affected (0 or 1)
+        if inserted == 0:
+            return f"skip (already success) {key}"
+
+        # build common source pipeline
+        src = (
+            f"aws --endpoint-url {shlex.quote(R2_ENDPOINT)} s3 cp "
+            f"s3://{R2_BUCKET}/{shlex.quote(key)} - | s2dec | (jq -c '.[]' 2>/dev/null || cat)"
+        )
+
+        msg_cmd = f"{src} | curl -sS '{_curl_insert(_sql_insert_messages())}' --data-binary @-"
+        sub_cmd = f"{src} | curl -sS '{_curl_insert(_sql_insert_subcalls())}' --data-binary @-"
+
+        try:
+            for cmd in (msg_cmd, sub_cmd):
+                proc = subprocess.run(cmd, shell=True, executable=SHELL)
+                if proc.returncode != 0:
+                    raise RuntimeError(f"pipeline failed: {cmd}")
+
+            # --- SUCCESS ---
+            upd = f"""
+            ALTER TABLE filecoin.loaded_keys
+            UPDATE status = 'success', processed_at = now(), updated_at = now(), last_error = ''
+            WHERE key = '{esc(key)}' AND etag = '{esc(etag)}' AND status = 'running'
+            """
+            c.command(upd)
+            return f"ok {key}"
+
+        except Exception as e:
+            # --- FAIL (record error but keep eligibility for retry next run) ---
+            err = esc(str(e))[:2048]
+            upd = f"""
+            ALTER TABLE filecoin.loaded_keys
+            UPDATE status = 'failed', updated_at = now(), last_error = '{err}'
+            WHERE key = '{esc(key)}' AND etag = '{esc(etag)}' AND status = 'running'
+            """
+            c.command(upd)
+            raise
+
+    @task
+    def dq_checks():
+        c = ch()
+        n = c.query("""
+            SELECT count() FROM filecoin.messages
+            WHERE msg_cid = '' OR to_addr = '' OR from_addr = ''
+        """).first_item()
+        if n > 0:
+            raise RuntimeError(f"DQ failed: {n} bad rows")
+
+    init = init_schema()
+    keys = list_keys()
+    results = ingest_one.expand(obj=keys)
+    dq = dq_checks()
+
+    init >> keys >> results >> dq
