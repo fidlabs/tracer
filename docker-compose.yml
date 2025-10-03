@@ -35,6 +35,9 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: "default"
     ports:
       - "8123:8123"   # HTTP
     ulimits:

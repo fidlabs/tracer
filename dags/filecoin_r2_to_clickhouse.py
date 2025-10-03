@@ -23,7 +23,7 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 SHELL = "bash"
 
 def ch():
-    return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT)
+    return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, username="default", password="default")
 
 def _curl_insert(sql: str) -> str:
     # Properly URL-encode the SQL for the ClickHouse HTTP 'query' parameter.

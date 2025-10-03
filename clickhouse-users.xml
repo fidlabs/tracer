@@ -1,0 +1,15 @@
+<clickhouse>
+  <!-- Docs: <https://clickhouse.com/docs/en/operations/settings/settings_users/> -->
+  <users>
+    <default>
+      <!-- Allow connections from Docker network -->
+      <networks>
+        <ip>::1</ip>
+        <ip>127.0.0.1</ip>
+        <ip>172.16.0.0/12</ip>  <!-- Docker network range -->
+        <ip>10.0.0.0/8</ip>     <!-- Additional Docker network range -->
+      </networks>
+      <password></password>
+    </default>
+  </users>
+</clickhouse>
