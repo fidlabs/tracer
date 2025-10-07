@@ -20,8 +20,10 @@ CH_HTTP = os.getenv("CH_HTTP", "http://clickhouse:8123")
 CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
-# Optional: limit the number of objects to process (for testing/debugging)
-MAX_OBJECTS = int(os.getenv("MAX_OBJECTS", "0"))  # 0 means no limit
+# Processing configuration
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))  # Number of files to process per run
+START_FROM = int(os.getenv("START_FROM", "1"))    # Starting file number (1-based)
+MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
 
@@ -113,7 +115,12 @@ with DAG(
 
     @task
     def list_keys() -> list[dict]:
-        """List *all* objects under prefix; filter by simple glob suffix like *.json.s2."""
+        """Generate sequential file keys based on deterministic naming pattern.
+        
+        Files are named: traces_000000000001.json.s2, traces_000000000002.json.s2, etc.
+        This function generates BATCH_SIZE sequential keys starting from START_FROM.
+        Skips files that have already been successfully processed (immutable files).
+        """
         s3 = boto3.client(
             "s3",
             aws_access_key_id=R2_ACCESS_KEY_ID,
@@ -121,49 +128,82 @@ with DAG(
             endpoint_url=R2_ENDPOINT,
             region_name="auto",
         )
-        suffix = R2_GLOB.split("*")[-1] if "*" in R2_GLOB else R2_GLOB
+        
+        c = ch()
+        
+        # Get the set of already successfully processed keys
+        print("Checking for already processed files...")
+        processed_keys_query = """
+            SELECT key 
+            FROM filecoin.loaded_keys 
+            WHERE status = 'success'
+        """
+        processed_keys_result = c.query(processed_keys_query)
+        processed_keys = set(row[0] for row in processed_keys_result.result_rows)
+        print(f"Found {len(processed_keys)} already processed files")
+        
         keys = []
-        paginator = s3.get_paginator("list_objects_v2")
+        missing_count = 0
+        current_num = START_FROM
+        skipped_count = 0
         
-        print(f"Starting to list objects in bucket '{R2_BUCKET}' with prefix '{R2_PREFIX}' and suffix '{suffix}'")
-        page_count = 0
-        total_objects = 0
-        matching_objects = 0
+        print(f"Starting sequential processing: batch_size={BATCH_SIZE}, start_from={START_FROM}")
+        print(f"Looking for files: traces_XXXXXXXXXXXX.json.s2 format")
         
-        for page in paginator.paginate(Bucket=R2_BUCKET, Prefix=R2_PREFIX):
-            page_count += 1
-            page_objects = page.get("Contents", [])
-            total_objects += len(page_objects)
+        # Process BATCH_SIZE files sequentially
+        for i in range(BATCH_SIZE):
+            # Generate the deterministic filename
+            filename = f"traces_{current_num:012d}.json.s2"
+            key = f"{R2_PREFIX}traces/{filename}" if R2_PREFIX else f"traces/{filename}"
             
-            print(f"Processing page {page_count}, found {len(page_objects)} objects (total so far: {total_objects})")
+            # Check if already processed
+            if key in processed_keys:
+                print(f"⊙ Already processed {filename} - skipping")
+                skipped_count += 1
+                current_num += 1
+                continue
             
-            for obj in page_objects:
-                k = obj["Key"]
-                if suffix and not k.endswith(suffix):
-                    continue
-                matching_objects += 1
-                lm = obj["LastModified"]
+            try:
+                # Check if the file exists by trying to get its metadata
+                response = s3.head_object(Bucket=R2_BUCKET, Key=key)
+                
+                # File exists, add it to our processing list
+                lm = response.get("LastModified")
                 if hasattr(lm, "timestamp"):
                     lm_ts = datetime.fromtimestamp(lm.timestamp(), tz=timezone.utc)
                 else:
                     lm_ts = datetime.now(timezone.utc)
+                    
                 keys.append({
-                    "key": k,
-                    "etag": obj.get("ETag","").strip('"'),
-                    "size": int(obj.get("Size", 0)),
-                    "last_modified": lm_ts.isoformat()
+                    "key": key,
+                    "etag": response.get("ETag", "").strip('"'),
+                    "size": int(response.get("ContentLength", 0)),
+                    "last_modified": lm_ts.isoformat(),
+                    "sequence_number": current_num
                 })
                 
-                # Check if we've hit the limit
-                if MAX_OBJECTS > 0 and matching_objects >= MAX_OBJECTS:
-                    print(f"Hit MAX_OBJECTS limit of {MAX_OBJECTS}, stopping pagination")
+                print(f"✓ Found {filename} ({response.get('ContentLength', 0)} bytes)")
+                missing_count = 0  # Reset missing counter
+                
+            except s3.exceptions.NoSuchKey:
+                # File doesn't exist
+                missing_count += 1
+                print(f"✗ Missing {filename} (missing count: {missing_count})")
+                
+                # If we hit too many consecutive missing files, stop processing
+                if missing_count >= MAX_MISSING_WAIT:
+                    print(f"Stopping: {missing_count} consecutive missing files (max: {MAX_MISSING_WAIT})")
+                    break
+                    
+            except Exception as e:
+                print(f"Error checking {filename}: {str(e)}")
+                missing_count += 1
+                if missing_count >= MAX_MISSING_WAIT:
                     break
             
-            # Break outer loop if we hit the limit
-            if MAX_OBJECTS > 0 and matching_objects >= MAX_OBJECTS:
-                break
+            current_num += 1
         
-        print(f"Completed listing: {page_count} pages, {total_objects} total objects, {matching_objects} matching files")
+        print(f"Completed: found {len(keys)} new files to process, {skipped_count} already processed, stopped at sequence {current_num}")
         return keys
 
     @task
