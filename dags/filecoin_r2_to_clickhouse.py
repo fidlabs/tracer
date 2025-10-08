@@ -31,8 +31,9 @@ def ch():
     return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, username="default", password="default")
 
 def _curl_insert(sql: str) -> str:
-    # Properly URL-encode the SQL for the ClickHouse HTTP 'query' parameter.
-    return f"{CH_HTTP}/?query={quote(sql)}"
+    # For input() format, we send SQL via query param and data via POST body
+    # But we need to be careful about URL length limits
+    return f"{CH_HTTP}/?user=default&password=default"
 
 def _sql_insert_messages() -> str:
     return """
@@ -62,9 +63,6 @@ SELECT
   JSONExtractString(line,'Error')                               AS trace_error,
   now()                                                         AS ingested_at
 FROM input('line String')
-WHERE NOT EXISTS (
-  SELECT 1 FROM filecoin.messages m WHERE m.msg_cid = JSONExtractString(line,'MsgCid','/')
-)
 FORMAT LineAsString
 """.strip()
 
@@ -88,10 +86,6 @@ FROM (
   FROM input(' _line String ')
 )
 ARRAY JOIN subs AS sub, arrayEnumerate(subs) AS idx
-WHERE NOT EXISTS (
-  SELECT 1 FROM filecoin.subcalls s
-  WHERE s.parent_cid = JSONExtractString(line,'MsgCid','/') AND s.idx = idx
-)
 FORMAT LineAsString
 """.strip()
 
@@ -238,49 +232,66 @@ with DAG(
             return f"skip (already success) {key}"
 
         # build common source pipeline
+        # Note: s2d -c - means "decompress from stdin to stdout"
+        # .Trace[] extracts each element from the Trace array
+        # Full paths to all binaries and explicit PATH for subprocess
         src = (
-            f"aws --endpoint-url {shlex.quote(R2_ENDPOINT)} s3 cp "
-            f"s3://{R2_BUCKET}/{shlex.quote(key)} - | s2dec | (jq -c '.[]' 2>/dev/null || cat)"
+            f"AWS_ACCESS_KEY_ID={shlex.quote(R2_ACCESS_KEY_ID)} "
+            f"AWS_SECRET_ACCESS_KEY={shlex.quote(R2_SECRET_ACCESS_KEY)} "
+            f"PATH=/home/airflow/.local/bin:/usr/local/bin:/usr/bin:/bin "
+            f"/home/airflow/.local/bin/aws --endpoint-url {shlex.quote(R2_ENDPOINT)} s3 cp "
+            f"s3://{R2_BUCKET}/{shlex.quote(key)} - | /usr/local/bin/s2d -c - | /usr/bin/jq -c '.Trace[]'"
         )
 
-        msg_cmd = f"{src} | curl -sS '{_curl_insert(_sql_insert_messages())}' --data-binary @-"
-        sub_cmd = f"{src} | curl -sS '{_curl_insert(_sql_insert_subcalls())}' --data-binary @-"
+        # Send SQL and data together: SQL as query param, data as POST body
+        msg_cmd = f"{src} | curl -sS '{_curl_insert(_sql_insert_messages())}&query={quote(_sql_insert_messages())}' --data-binary @-"
+        sub_cmd = f"{src} | curl -sS '{_curl_insert(_sql_insert_subcalls())}&query={quote(_sql_insert_subcalls())}' --data-binary @-"
 
         try:
-            for cmd in (msg_cmd, sub_cmd):
-                proc = subprocess.run(cmd, shell=True, executable=SHELL)
+            for cmd_name, cmd in [("messages", msg_cmd), ("subcalls", sub_cmd)]:
+                print(f"Running {cmd_name} pipeline...")
+                proc = subprocess.run(cmd, shell=True, executable=SHELL, capture_output=True, text=True)
+                print(f"Subprocess STDERR: {proc.stderr}")
+                print(f"Subprocess STDOUT: {proc.stdout}")
                 if proc.returncode != 0:
-                    raise RuntimeError(f"pipeline failed: {cmd}")
+                    raise RuntimeError(f"{cmd_name} pipeline failed with code {proc.returncode}")
+                print(f"✓ {cmd_name} pipeline completed")
 
             # --- SUCCESS ---
-            upd = f"""
-            ALTER TABLE filecoin.loaded_keys
-            UPDATE status = 'success', processed_at = now(), updated_at = now(), last_error = ''
-            WHERE key = '{esc(key)}' AND etag = '{esc(etag)}' AND status = 'running'
-            """
-            c.command(upd)
+            # Delete the running record and insert a success record (for ReplacingMergeTree compatibility)
+            c.command(f"DELETE FROM filecoin.loaded_keys WHERE key = '{esc(key)}' AND etag = '{esc(etag)}' AND status = 'running'")
+            c.command(f"""
+                INSERT INTO filecoin.loaded_keys (key, etag, size_bytes, last_modified, status, attempts, last_error, first_seen, updated_at, processed_at)
+                VALUES ('{esc(key)}', '{esc(etag)}', {size}, parseDateTimeBestEffort('{esc(lm)}'), 'success', 
+                        (SELECT max(attempts) FROM filecoin.loaded_keys WHERE key = '{esc(key)}'), 
+                        '', now(), now(), now())
+            """)
             return f"ok {key}"
 
         except Exception as e:
             # --- FAIL (record error but keep eligibility for retry next run) ---
             err = esc(str(e))[:2048]
-            upd = f"""
-            ALTER TABLE filecoin.loaded_keys
-            UPDATE status = 'failed', updated_at = now(), last_error = '{err}'
-            WHERE key = '{esc(key)}' AND etag = '{esc(etag)}' AND status = 'running'
-            """
-            c.command(upd)
+            # Delete the running record and insert a failed record
+            c.command(f"DELETE FROM filecoin.loaded_keys WHERE key = '{esc(key)}' AND etag = '{esc(etag)}' AND status = 'running'")
+            c.command(f"""
+                INSERT INTO filecoin.loaded_keys (key, etag, size_bytes, last_modified, status, attempts, last_error, first_seen, updated_at, processed_at)
+                VALUES ('{esc(key)}', '{esc(etag)}', {size}, parseDateTimeBestEffort('{esc(lm)}'), 'failed',
+                        (SELECT max(attempts) FROM filecoin.loaded_keys WHERE key = '{esc(key)}'),
+                        '{err}', now(), now(), NULL)
+            """)
             raise
 
     @task
     def dq_checks():
         c = ch()
-        n = c.query("""
+        result = c.query("""
             SELECT count() FROM filecoin.messages
             WHERE msg_cid = '' OR to_addr = '' OR from_addr = ''
-        """).first_item()
+        """)
+        n = result.result_rows[0][0] if result.result_rows else 0
         if n > 0:
             raise RuntimeError(f"DQ failed: {n} bad rows")
+        print(f"✓ Data quality check passed: {n} bad rows found")
 
     init = init_schema()
     keys = list_keys()
