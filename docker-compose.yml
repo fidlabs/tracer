@@ -71,6 +71,7 @@ services:
     command: bash -lc "airflow scheduler"
     volumes:
       - ./dags:/opt/airflow/dags
+      - ./plugins:/opt/airflow/plugins
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
     depends_on:
@@ -90,6 +91,7 @@ services:
       - "8080:8080"
     volumes:
       - ./dags:/opt/airflow/dags
+      - ./plugins:/opt/airflow/plugins
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
     depends_on:
