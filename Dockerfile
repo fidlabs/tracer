@@ -5,10 +5,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     ca-certificates \
     wget \
+    git \
+    build-essential \
+    libhwloc-dev \
+    ocl-icd-opencl-dev \
+    pocl-opencl-icd \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Install newer Go version (1.22+) to build s2
-RUN wget -O /tmp/go.tar.gz https://go.dev/dl/go1.22.0.linux-amd64.tar.gz && \
+# Install newer Go version (1.25+) to build s2
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+    amd64) GOARCH=amd64 ;; \
+    arm64) GOARCH=arm64 ;; \
+    *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \ 
+    wget -O /tmp/go.tar.gz https://go.dev/dl/go1.25.0.linux-${GOARCH}.tar.gz && \
     tar -C /usr/local -xzf /tmp/go.tar.gz && \
     rm /tmp/go.tar.gz
 
@@ -16,6 +28,11 @@ RUN wget -O /tmp/go.tar.gz https://go.dev/dl/go1.22.0.linux-amd64.tar.gz && \
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 ENV GOBIN=/usr/local/bin
 RUN /usr/local/go/bin/go install github.com/klauspost/compress/s2/cmd/...@v1.17.0
+
+# Build and install filecoin-ffi
+RUN mkdir -p /opt/filecoin-ffi
+RUN git clone https://github.com/filecoin-project/filecoin-ffi.git /opt/filecoin-ffi
+RUN cd /opt/filecoin-ffi/ && make
 
 # Ensure directories exist and have proper permissions
 RUN mkdir -p /opt/airflow/dags /opt/airflow/include /opt/airflow/logs && \
