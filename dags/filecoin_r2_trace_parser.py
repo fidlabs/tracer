@@ -3,6 +3,7 @@ import os, shlex, subprocess
 from datetime import datetime, timezone
 from airflow import DAG
 from airflow.decorators import task
+import subprocess
 import boto3
 import clickhouse_connect
 from urllib.parse import quote
@@ -27,10 +28,10 @@ MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive m
 
 SHELL = "bash"
 
-def find_subcall(subcalls, destination=None):
+def find_subcall(subcalls, destination=None, method=None):
     """
-    Find the first subcall element that matches the destination address.
-    
+    Find the first subcall element that matches the destination address and method.
+
     Args:
         subcalls (list): List of subcall objects
         destination (str): Target address to find match for
@@ -43,14 +44,12 @@ def find_subcall(subcalls, destination=None):
         
     for subcall in subcalls:
         # Check if this subcall matches the destination
-        if subcall['Msg']['To'] == destination:
+        if subcall['Msg']['To'] == destination and subcall['Msg']['Method'] == method:
             return subcall
         
         # Recursively check nested subcalls if they exist
         if subcall.get('Subcalls'):
-            nested_match = find_subcall(subcall['Subcalls'], destination)
-            if nested_match is not None:
-                return nested_match
+            return find_subcall(subcall['Subcalls'], destination, method)
     
     return None
 
@@ -137,7 +136,7 @@ with DAG(
         return keys
 
     @task
-    def ingest_one(obj: dict) -> str:
+    def process_trace(obj: dict) -> list[dict]:
         """
         Claim → stream/decode → insert → mark success/fail.
         Never reprocess (key,etag) if already success.
@@ -167,6 +166,7 @@ with DAG(
             result = subprocess.run(src, shell=True, capture_output=True, text=True, check=True)
             lines = result.stdout.strip().split('\n')
             
+            matches = []
             print(f"Processing {len(lines)} trace objects...")
             
             for i, line in enumerate(lines):
@@ -174,17 +174,19 @@ with DAG(
                     try:
                         import json
                         trace_obj = json.loads(line)
-                        f06_call = find_subcall(subcalls=trace_obj['ExecutionTrace']['Subcalls'], destination="f06")
+                        f06_call = find_subcall(subcalls=trace_obj['ExecutionTrace']['Subcalls'], destination="f06", method=2)
                         
                         if f06_call:
                             msg = f06_call['Msg']
                             print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
+                            matches.append(msg)
                         else:
                             print(f"No f06 subcall in trace {i+1}")
 
                     except json.JSONDecodeError as e:
                         print(f"Failed to parse JSON on line {i+1}: {e}")
                         print(f"Line content: {line}")
+            return matches
 
         except subprocess.CalledProcessError as e:
             print(f"Pipeline failed: {e}")
@@ -192,8 +194,57 @@ with DAG(
             print(f"stderr: {e.stderr}")
             raise
 
+    # Flatten the results and apply decode_parameters to each message
+    @task
+    def flatten_results(results_list):
+        """Flatten the list of lists into individual message objects"""
+        flattened = []
+        for result_group in results_list:
+            if isinstance(result_group, list):
+                flattened.extend(result_group)
+            else:
+                flattened.append(result_group)
+        return flattened
+    
+    @task
+    def decode_parameters(obj: dict) -> str:
+        """
+        Decode parameters using the Go executable with dynamic inputs.
+        
+        Args:
+            obj: Message object with 'To' (actor CID), 'Method', and 'Params'
+        
+        Returns:
+            Decoded parameters as JSON string
+        """
+        
+        
+        cmd = [
+            "/opt/airflow/plugins/goExecutables/datacapstats",
+            "bafk2bzaceak2iqpfy4hw6xyyrf7c4yfh7pl4copzm7t63mokecsxfcnybxnd2",
+            "2",
+            obj['Params']
+        ]
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to decode parameters for {obj}")
+            print(f"Command: {' '.join(cmd)}")
+            print(f"stdout: {e.stdout}")
+            print(f"stderr: {e.stderr}")
+            raise
 
+    @task
+    def output_results(decoded_param: str) -> None:
+        print(f"Decoded parameters: {decoded_param}")
+
+    
+    
     keys = list_keys()
-    results = ingest_one.expand(obj=keys)
-
-    keys >> results
+    results = process_trace.expand(obj=keys) 
+    flattened = flatten_results(results)
+    decoded_results = decode_parameters.expand(obj=flattened)
+    output = output_results.expand(decoded_param=decoded_results)
+    keys >> results >> flattened >> decoded_results >> output
