@@ -6,6 +6,8 @@ from airflow.decorators import task
 import subprocess
 import boto3
 import clickhouse_connect
+import json
+
 from urllib.parse import quote
 
 # Configuration from environment variables
@@ -22,34 +24,48 @@ CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))  # Number of files to process per run
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))  # Number of files to process per run
 START_FROM = int(os.getenv("START_FROM", "4394387"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
 
-def find_subcall(subcalls, destination=None, method=None):
+def find_subcall(subcalls, matchers=None):
     """
-    Find the first subcall element that matches the destination address and method.
+    Find the first subcall element that matches any destination/method combination.
 
     Args:
         subcalls (list): List of subcall objects
-        destination (str): Target address to find match for
+        matchers (list): List of arrays, where each array has [destination, method1, method2, ...]
+                        First element is the destination address, rest are valid methods
         
     Returns:
         dict or None: First subcall object that matches the condition, or None if no match
     """
-    if subcalls is None:
+    if subcalls is None or matchers is None:
         return None
         
     for subcall in subcalls:
-        # Check if this subcall matches the destination
-        if subcall['Msg']['To'] == destination and subcall['Msg']['Method'] == method:
-            return subcall
+        msg_to = subcall['Msg']['To']
+        msg_method = subcall['Msg']['Method']
+        
+        # Check if this subcall matches any of the matchers
+        for matcher in matchers:
+            if len(matcher) < 2:
+                continue
+            
+            destination = matcher[0]
+            methods = matcher[1:]  # Rest of the array are the methods
+            
+            # Check if destination matches and method is in the list of methods
+            if msg_to == destination and msg_method in methods:
+                return subcall
         
         # Recursively check nested subcalls if they exist
         if subcall.get('Subcalls'):
-            return find_subcall(subcall['Subcalls'], destination, method)
+            result = find_subcall(subcall['Subcalls'], matchers)
+            if result is not None:
+                return result
     
     return None
 
@@ -172,12 +188,15 @@ with DAG(
             for i, line in enumerate(lines):
                 if line.strip():  # Skip empty lines
                     try:
-                        import json
                         trace_obj = json.loads(line)
-                        f06_call = find_subcall(subcalls=trace_obj['ExecutionTrace']['Subcalls'], destination="f06", method=2)
+                        # matchers format: [[destination, method1, method2, ...], ...]
+                        subcall = find_subcall(
+                            subcalls=trace_obj['ExecutionTrace']['Subcalls'], 
+                            matchers=[["f06", 2, 4, 9, 3916220144], ["f07", 3621052141, 80475954]]
+                        )
                         
-                        if f06_call:
-                            msg = f06_call['Msg']
+                        if subcall:
+                            msg = subcall['Msg']
                             print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
                             matches.append(msg)
                         else:
@@ -220,15 +239,17 @@ with DAG(
         
         
         cmd = [
-            "/opt/airflow/plugins/goExecutables/datacapstats",
-            "bafk2bzaceak2iqpfy4hw6xyyrf7c4yfh7pl4copzm7t63mokecsxfcnybxnd2",
-            "2",
-            obj['Params']
+            "/opt/airflow/plugins/goExecutables/decode_params",
+            obj['To'],
+            str(obj['Method']),
+            obj['Params'],
+            "27"
         ]
         
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            return result.stdout.strip()
+            decodedParams = json.loads(result.stdout.strip())
+            return {"msg": obj, "decodedParams": decodedParams}
         except subprocess.CalledProcessError as e:
             print(f"Failed to decode parameters for {obj}")
             print(f"Command: {' '.join(cmd)}")
@@ -237,14 +258,37 @@ with DAG(
             raise
 
     @task
-    def output_results(decoded_param: str) -> None:
-        print(f"Decoded parameters: {decoded_param}")
+    def output_results(obj: dict) -> None:
+        # allocation from the datacap holder
+        if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05":
+            print(f"allocation from datacap holder matched for message")
 
-    
-    
+        # allocation not from the datacap holder
+        if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954:
+            print(f"allocation not from datacap holder matched for message")
+
+        # claim 
+        if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 9:
+            print(f"claim matched for message")
+
+        # create verifier (f080 multisig)
+        if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
+            print(f"create verifier matched for message")
+
+        # create client meta-allocator
+        if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 3916220144:
+            print(f"create client meta-allocator matched for message")
+
+        # create client 
+        if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 4:
+            print(f"create client matched for message")
+
+        print(f"Initial message: {obj['msg']}")
+        print(f"Decoded parameters: {obj['decodedParams']}")
+
     keys = list_keys()
     results = process_trace.expand(obj=keys) 
     flattened = flatten_results(results)
     decoded_results = decode_parameters.expand(obj=flattened)
-    output = output_results.expand(decoded_param=decoded_results)
+    output = output_results.expand(obj=decoded_results)
     keys >> results >> flattened >> decoded_results >> output

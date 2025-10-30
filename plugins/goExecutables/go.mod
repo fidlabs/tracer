@@ -2,6 +2,7 @@ module datacapstats
 
 go 1.25.1
 
+// replace github.com/filecoin-project/filecoin-ffi => /Users/catalinbara/work/lotus/extern/filecoin-ffi
 replace github.com/filecoin-project/filecoin-ffi => /opt/filecoin-ffi
 
 require (

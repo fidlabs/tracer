@@ -9,29 +9,55 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/ipfs/go-cid"
-
 	"github.com/filecoin-project/go-state-types/abi"
+	actorstypes "github.com/filecoin-project/go-state-types/actors"
+	"github.com/filecoin-project/go-state-types/network"
+	"github.com/filecoin-project/lotus/chain/actors"
 	"github.com/filecoin-project/lotus/chain/consensus"
 	"github.com/filecoin-project/lotus/chain/stmgr"
 )
 
 func main() {
-	// Check if we have the required 3 arguments
-	if len(os.Args) != 4 {
-		log.Fatalf("Usage: %s <actor_cid> <method_number> <params_base64>\n", os.Args[0])
+	// Check if we have the required 5 arguments
+	if len(os.Args) != 5 {
+		log.Fatalf("Usage: %s <actor_address_id> <method_number> <params_base64> <network_version>\n", os.Args[0])
 	}
 
 	// Parse command line arguments
-	actorCidStr := os.Args[1]
+	actorAddressId := os.Args[1]
 	methodNumStr := os.Args[2]
 	paramsBase64 := os.Args[3]
+	networkVersionArg := os.Args[4]
 
-	// Parse actor CID
-	actorCode, err := cid.Decode(actorCidStr)
+	networkVersion, err := strconv.Atoi(networkVersionArg)
 	if err != nil {
-		log.Fatalf("Failed to decode actor code CID '%s': %v", actorCidStr, err)
+		log.Fatalf("Failed to parse network version '%s': %v", networkVersionArg, err)
 	}
+
+	actorVersion, err := actorstypes.VersionForNetwork(network.Version(networkVersion))
+	if err != nil {
+		log.Fatalf("Failed to get actor version: %v", err)
+	}
+
+	actorCodes, err := actors.GetActorCodeIDs(actorVersion)
+	if err != nil {
+		log.Fatalf("Failed to get actor code IDs: %v", err)
+	}
+
+	actorName := ""
+	if actorAddressId == "f06" {
+		actorName = "verifiedregistry"
+	}
+
+	if actorAddressId == "f07" {
+		actorName = "datacap"
+	}
+
+	if actorName == "" {
+		log.Fatalf("Unsupported actor address ID: %s", actorAddressId)
+	}
+
+	actorCode := actorCodes[actorName]
 
 	// Parse method number
 	methodNum, err := strconv.Atoi(methodNumStr)
