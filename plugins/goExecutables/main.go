@@ -53,6 +53,10 @@ func main() {
 		actorName = "datacap"
 	}
 
+	if actorAddressId == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" {
+		actorName = "evm"
+	}
+
 	if actorName == "" {
 		log.Fatalf("Unsupported actor address ID: %s", actorAddressId)
 	}

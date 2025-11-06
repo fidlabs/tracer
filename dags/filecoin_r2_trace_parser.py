@@ -7,6 +7,10 @@ import subprocess
 import boto3
 import clickhouse_connect
 import json
+import base64
+from web3 import Web3
+from web3.contract import Contract
+from filecoin_address import  encode, Address, CoinType
 
 from urllib.parse import quote
 
@@ -24,8 +28,8 @@ CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "4394387"))    # Starting file number (1-based)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
+START_FROM = int(os.getenv("START_FROM", "5448171"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
@@ -192,7 +196,9 @@ with DAG(
                         # matchers format: [[destination, method1, method2, ...], ...]
                         subcall = find_subcall(
                             subcalls=trace_obj['ExecutionTrace']['Subcalls'], 
-                            matchers=[["f06", 2, 4, 9, 3916220144], ["f07", 3621052141, 80475954]]
+                            matchers=[["f06", 2, 4, 9, 3916220144], ["f07", 3621052141, 80475954], ["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
+                            # matchers=[["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
+
                         )
                         
                         if subcall:
@@ -282,6 +288,24 @@ with DAG(
         # create client 
         if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 4:
             print(f"create client matched for message")
+  
+        # meta-allocator instance
+        if obj['msg']['To'] == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" and obj['msg']['Method'] == 3844450837:
+            print(f"meta-allocator matched for message")
+            hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
+            with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
+                abi = json.load(f)
+        
+            w3 = Web3()
+            contract = w3.eth.contract(address=Web3.to_checksum_address('0x984376abd1ff5518b6ae9d065c40696ae916dc88'), abi=abi)
+            decodedContractFunction = contract.decode_function_input(hexEthTxInput)
+            functionName = decodedContractFunction[0].fn_name
+            functionParams = decodedContractFunction[1]
+
+            if functionName == "addVerifiedClient":
+                address = Address(functionParams.get('clientAddress'), CoinType.MAIN)
+                print(encode('f', address))
+                print(functionParams.get('amount'))
 
         print(f"Initial message: {obj['msg']}")
         print(f"Decoded parameters: {obj['decodedParams']}")
