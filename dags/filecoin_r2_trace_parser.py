@@ -11,6 +11,8 @@ import base64
 from web3 import Web3
 from web3.contract import Contract
 from filecoin_address import  encode, Address, CoinType
+from cbor2 import CBORTag, loads
+from multiformats import CID
 
 from urllib.parse import quote
 
@@ -33,6 +35,16 @@ START_FROM = int(os.getenv("START_FROM", "5448171"))    # Starting file number (
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
+
+def find_actor_name(actor_address_id):
+    actorName = ""
+    if actor_address_id == "f06":
+        actorName = "verifiedregistry"
+    if actor_address_id == "f07":
+        actorName = "datacap"
+    if actor_address_id == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja":
+        actorName = "evm"
+    return actorName
 
 def find_subcall(subcalls, matchers=None):
     """
@@ -73,6 +85,47 @@ def find_subcall(subcalls, matchers=None):
     
     return None
 
+def strip_until_sentinel(data: bytes) -> bytes:
+    """
+    Removes leading bytes until the first 0x00 byte is reached.
+    
+    Args:
+        data: The input byte array.
+        
+    Returns:
+        The byte array starting from the first 0x00 (inclusive).
+        Returns empty bytes if 0x00 is not found.
+    """
+    index = data.find(b'\x00')  # find first occurrence of 0x00
+    if index == -1:
+        return b''  # no sentinel found
+    return data[index:]  # include the 0x00
+    
+def extract_dag_cid(obj):
+    """
+    Handles CBOR Tag(42, ...) or raw bytes representing a DAG-CBOR link.
+    Returns a base32 CID string if possible, otherwise a hex fallback.
+    """
+    if isinstance(obj, CBORTag) and obj.tag == 42:
+        data = obj.value
+    elif isinstance(obj, bytes):
+        data = obj
+    else:
+        return None
+
+    data = strip_until_sentinel(data)
+    # DAG-CBOR links usually start with 0x00 sentinel
+    if data and data[0] == 0x00:
+        cid_bytes = data[1:]  # remove sentinel
+        try:
+            cid = CID.decode(cid_bytes)
+            return cid.encode("base32")
+        except Exception:
+            return cid_bytes.hex()  # fallback
+    else:
+        # Could be nonstandard; fallback
+        return data.hex()
+    
 with DAG(
     dag_id="filecoin_r2_s2_trace_parser",
     start_date=datetime(2024, 1, 1),
@@ -246,7 +299,7 @@ with DAG(
         
         cmd = [
             "/opt/airflow/plugins/goExecutables/decode_params",
-            obj['To'],
+            find_actor_name(obj['To']),
             str(obj['Method']),
             obj['Params'],
             "27"
@@ -268,6 +321,11 @@ with DAG(
         # allocation from the datacap holder
         if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05":
             print(f"allocation from datacap holder matched for message")
+            # print(f"Decoded parameters: {obj['decodedParams']}")
+            decoded = loads(base64.b64decode(obj['decodedParams']['OperatorData']))
+
+            for element in decoded[0]:
+                print(extract_dag_cid(element[1]))
 
         # allocation not from the datacap holder
         if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954:

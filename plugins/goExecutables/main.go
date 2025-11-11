@@ -24,7 +24,7 @@ func main() {
 	}
 
 	// Parse command line arguments
-	actorAddressId := os.Args[1]
+	actorName := os.Args[1]
 	methodNumStr := os.Args[2]
 	paramsBase64 := os.Args[3]
 	networkVersionArg := os.Args[4]
@@ -42,23 +42,6 @@ func main() {
 	actorCodes, err := actors.GetActorCodeIDs(actorVersion)
 	if err != nil {
 		log.Fatalf("Failed to get actor code IDs: %v", err)
-	}
-
-	actorName := ""
-	if actorAddressId == "f06" {
-		actorName = "verifiedregistry"
-	}
-
-	if actorAddressId == "f07" {
-		actorName = "datacap"
-	}
-
-	if actorAddressId == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" {
-		actorName = "evm"
-	}
-
-	if actorName == "" {
-		log.Fatalf("Unsupported actor address ID: %s", actorAddressId)
 	}
 
 	actorCode := actorCodes[actorName]
