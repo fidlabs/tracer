@@ -31,7 +31,7 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "5448171"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "5247857"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
@@ -251,13 +251,19 @@ with DAG(
                             subcalls=trace_obj['ExecutionTrace']['Subcalls'], 
                             matchers=[["f06", 2, 4, 9, 3916220144], ["f07", 3621052141, 80475954], ["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
                             # matchers=[["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
-
                         )
                         
                         if subcall:
                             msg = subcall['Msg']
+                            aux = []
+                            if msg['To'] == "f07" and msg['Method'] == 3621052141 and msg['From'] == "f05":
+                                verifregSubcall = find_subcall(subcalls=subcall['Subcalls'], matchers=[["f06", 3726118371]])
+                                if verifregSubcall:
+                                    if verifregSubcall['Msg']['From']=='f07':
+                                        aux= verifregSubcall['MsgRct']
+
                             print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
-                            matches.append(msg)
+                            matches.append({"msg": msg, "aux": aux})
                         else:
                             print(f"No f06 subcall in trace {i+1}")
 
@@ -299,16 +305,16 @@ with DAG(
         
         cmd = [
             "/opt/airflow/plugins/goExecutables/decode_params",
-            find_actor_name(obj['To']),
-            str(obj['Method']),
-            obj['Params'],
+            find_actor_name(obj['msg']['To']),
+            str(obj['msg']['Method']),
+            obj['msg']['Params'],
             "27"
         ]
         
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             decodedParams = json.loads(result.stdout.strip())
-            return {"msg": obj, "decodedParams": decodedParams}
+            return {"msg": obj['msg'], "aux": obj["aux"], "decodedParams": decodedParams}
         except subprocess.CalledProcessError as e:
             print(f"Failed to decode parameters for {obj}")
             print(f"Command: {' '.join(cmd)}")
@@ -317,60 +323,74 @@ with DAG(
             raise
 
     @task
-    def output_results(obj: dict) -> None:
-        # allocation from the datacap holder
-        if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05":
-            print(f"allocation from datacap holder matched for message")
-            # print(f"Decoded parameters: {obj['decodedParams']}")
-            decoded = loads(base64.b64decode(obj['decodedParams']['OperatorData']))
+    def output_results(decodedResults: dict) -> None:
+        batches = { "allocations": [] }
+        for obj in decodedResults:
+            # allocation from the datacap holder
+            if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05":
+                decodedReceipt = loads(base64.b64decode(obj['aux']['Return']))
+                decodedParams = loads(base64.b64decode(obj['decodedParams']['OperatorData']))
+                #decodedParams[0] is array of allocations
+                allocations = decodedParams[0]
+                for i in range(len(allocations)):
+                    allocation = allocations[i]
+                    allocationId = decodedReceipt[2][i]  # array of allocation IDs
+                    batches['allocations'].append(
+                        {
+                            'id': allocationId,
+                            'clientId': int(obj['decodedParams']['From'][2:]),  # strip 'f0' prefix
+                            'providerId': allocation[0],
+                            'pieceCid': extract_dag_cid(allocation[1]),
+                            'pieceSize': allocation[2],
+                            'termMin': allocation[3],
+                            'termMax': allocation[4],
+                            'expiration': allocation[5]
+                        }
+                    )
 
-            for element in decoded[0]:
-                print(extract_dag_cid(element[1]))
+            # allocation not from the datacap holder
+            if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954:
+                print(f"allocation not from datacap holder matched for message")
 
-        # allocation not from the datacap holder
-        if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954:
-            print(f"allocation not from datacap holder matched for message")
+            # claim 
+            if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 9:
+                print(f"claim matched for message")
 
-        # claim 
-        if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 9:
-            print(f"claim matched for message")
+            # create verifier (f080 multisig)
+            if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
+                print(f"create verifier matched for message")
 
-        # create verifier (f080 multisig)
-        if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
-            print(f"create verifier matched for message")
+            # create client meta-allocator
+            if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 3916220144:
+                print(f"create client meta-allocator matched for message")
 
-        # create client meta-allocator
-        if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 3916220144:
-            print(f"create client meta-allocator matched for message")
+            # create client 
+            if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 4:
+                print(f"create client matched for message")
+    
+            # meta-allocator instance
+            if obj['msg']['To'] == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" and obj['msg']['Method'] == 3844450837:
+                print(f"meta-allocator matched for message")
+                hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
+                with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
+                    abi = json.load(f)
+            
+                w3 = Web3()
+                contract = w3.eth.contract(address=Web3.to_checksum_address('0x984376abd1ff5518b6ae9d065c40696ae916dc88'), abi=abi)
+                decodedContractFunction = contract.decode_function_input(hexEthTxInput)
+                functionName = decodedContractFunction[0].fn_name
+                functionParams = decodedContractFunction[1]
 
-        # create client 
-        if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 4:
-            print(f"create client matched for message")
-  
-        # meta-allocator instance
-        if obj['msg']['To'] == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" and obj['msg']['Method'] == 3844450837:
-            print(f"meta-allocator matched for message")
-            hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
-            with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
-                abi = json.load(f)
-        
-            w3 = Web3()
-            contract = w3.eth.contract(address=Web3.to_checksum_address('0x984376abd1ff5518b6ae9d065c40696ae916dc88'), abi=abi)
-            decodedContractFunction = contract.decode_function_input(hexEthTxInput)
-            functionName = decodedContractFunction[0].fn_name
-            functionParams = decodedContractFunction[1]
-
-            if functionName == "addVerifiedClient":
-                address = Address(functionParams.get('clientAddress'), CoinType.MAIN)
-                print(encode('f', address))
-                print(functionParams.get('amount'))
-
-        print(f"Initial message: {obj['msg']}")
-        print(f"Decoded parameters: {obj['decodedParams']}")
+                if functionName == "addVerifiedClient":
+                    address = Address(functionParams.get('clientAddress'), CoinType.MAIN)
+                    print(encode('f', address))
+                    print(functionParams.get('amount'))
+                    
+        print(batches)
 
     keys = list_keys()
     results = process_trace.expand(obj=keys) 
     flattened = flatten_results(results)
     decoded_results = decode_parameters.expand(obj=flattened)
-    output = output_results.expand(obj=decoded_results)
+    output = output_results(decodedResults=decoded_results)
     keys >> results >> flattened >> decoded_results >> output
