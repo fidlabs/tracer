@@ -31,7 +31,7 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "5247857"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "4754605"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
@@ -84,6 +84,45 @@ def find_subcall(subcalls, matchers=None):
                 return result
     
     return None
+
+def find_subcall_and_parent(subcalls, parent=None, matchers=None):
+    """
+    Find the first subcall element that matches any destination/method combination.
+
+    Args:
+        subcalls (list): List of subcall objects
+        matchers (list): List of arrays, where each array has [destination, method1, method2, ...]
+                        First element is the destination address, rest are valid methods
+        
+    Returns:
+        dict or None: First subcall object that matches the condition, or None if no match
+    """
+    if subcalls is None or matchers is None:
+        return None, None
+        
+    for subcall in subcalls:
+        msg_to = subcall['Msg']['To']
+        msg_method = subcall['Msg']['Method']
+        
+        # Check if this subcall matches any of the matchers
+        for matcher in matchers:
+            if len(matcher) < 2:
+                continue
+            
+            destination = matcher[0]
+            methods = matcher[1:]  # Rest of the array are the methods
+            
+            # Check if destination matches and method is in the list of methods
+            if msg_to == destination and msg_method in methods:
+                return subcall, parent
+        
+        # Recursively check nested subcalls if they exist
+        if subcall.get('Subcalls'):
+            result = find_subcall_and_parent(subcall['Subcalls'], subcall, matchers)
+            if result != (None, None):
+                return result
+    
+    return None, None
 
 def strip_until_sentinel(data: bytes) -> bytes:
     """
@@ -247,23 +286,31 @@ with DAG(
                     try:
                         trace_obj = json.loads(line)
                         # matchers format: [[destination, method1, method2, ...], ...]
+                        parent = None
+
                         subcall = find_subcall(
                             subcalls=trace_obj['ExecutionTrace']['Subcalls'], 
-                            matchers=[["f06", 2, 4, 9, 3916220144], ["f07", 3621052141, 80475954], ["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
+                            matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ], ["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
                             # matchers=[["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
                         )
                         
+                        subcall, parent = find_subcall_and_parent(
+                            subcalls=trace_obj['ExecutionTrace']['Subcalls'],
+                            parent= trace_obj['ExecutionTrace']['Msg'],
+                            matchers=[["f06", 9]]
+                        )
+
                         if subcall:
                             msg = subcall['Msg']
                             aux = []
-                            if msg['To'] == "f07" and msg['Method'] == 3621052141 and msg['From'] == "f05":
+                            if (msg['To'] == "f07" and msg['Method'] == 3621052141 and msg['From'] == "f05") or (msg['To'] == "f07" and msg['Method'] == 80475954):
                                 verifregSubcall = find_subcall(subcalls=subcall['Subcalls'], matchers=[["f06", 3726118371]])
                                 if verifregSubcall:
                                     if verifregSubcall['Msg']['From']=='f07':
                                         aux= verifregSubcall['MsgRct']
 
                             print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
-                            matches.append({"msg": msg, "aux": aux})
+                            matches.append({"msg": msg, "aux": aux, "parent": parent})
                         else:
                             print(f"No f06 subcall in trace {i+1}")
 
@@ -302,34 +349,64 @@ with DAG(
             Decoded parameters as JSON string
         """
         
-        
-        cmd = [
-            "/opt/airflow/plugins/goExecutables/decode_params",
-            find_actor_name(obj['msg']['To']),
-            str(obj['msg']['Method']),
-            obj['msg']['Params'],
-            "27"
-        ]
-        
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            decodedParams = json.loads(result.stdout.strip())
-            return {"msg": obj['msg'], "aux": obj["aux"], "decodedParams": decodedParams}
+            decodeParametersCmd = [
+                "/opt/airflow/plugins/goExecutables/decode_params",
+                find_actor_name(obj['msg']['To']),
+                str(obj['msg']['Method']),
+                obj['msg']['Params'],
+                "27"
+            ]
+            resultDecodeParametersCmd = subprocess.run(decodeParametersCmd, capture_output=True, text=True, check=True)
+            decodedParams = json.loads(resultDecodeParametersCmd.stdout.strip())
         except subprocess.CalledProcessError as e:
             print(f"Failed to decode parameters for {obj}")
-            print(f"Command: {' '.join(cmd)}")
+            print(f"Command: {' '.join(decodeParametersCmd)}")
             print(f"stdout: {e.stdout}")
             print(f"stderr: {e.stderr}")
             raise
 
+        decodedParamsParent = None
+
+        print(obj['parent'])
+        if obj['parent'] and 'Method' in obj['parent'] and 'Params' in obj['parent'] and (obj['parent']['Method'] == 35 or obj['parent']['Method'] == 34):
+            try:
+                decodeParametersCmdParent = [
+                    "/opt/airflow/plugins/goExecutables/decode_params",
+                    "storageminer",
+                    str(obj['parent']['Method']),
+                    obj['parent']['Params'],
+                    "27"
+                ]
+                resultDecodeParametersCmdParent = subprocess.run(decodeParametersCmdParent, capture_output=True, text=True, check=True)
+                print(resultDecodeParametersCmd)
+                decodedParamsParent = json.loads(resultDecodeParametersCmdParent.stdout.strip())
+            except subprocess.CalledProcessError as e:
+                print(f"Failed to decode parent parameters for {obj}")
+                print(f"Command: {' '.join(decodeParametersCmdParent)}")
+                print(f"stdout: {e.stdout}")
+                print(f"stderr: {e.stderr}")
+                raise
+
+        return {"msg": obj['msg'], "aux": obj["aux"], "parent": obj["parent"], "decodedParams": decodedParams, "decodedParamsParent": decodedParamsParent}
+
+
     @task
     def output_results(decodedResults: dict) -> None:
-        batches = { "allocations": [] }
+        batches = { "allocations": [], "claims": [] }
         for obj in decodedResults:
-            # allocation from the datacap holder
-            if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05":
+            # allocation
+            if (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05") or (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954):
                 decodedReceipt = loads(base64.b64decode(obj['aux']['Return']))
                 decodedParams = loads(base64.b64decode(obj['decodedParams']['OperatorData']))
+                print(obj['decodedParams'])
+                clientId = ''
+                # Determine clientId based on method
+                # 3621052141 allocation from the datacap holder
+                # 80475954 allocation not from the datacap holder
+                if obj['msg']['Method'] == 3621052141: clientId = obj['decodedParams']['From']
+                if obj['msg']['Method'] == 80475954: clientId = obj['msg']['From']
+
                 #decodedParams[0] is array of allocations
                 allocations = decodedParams[0]
                 for i in range(len(allocations)):
@@ -338,7 +415,7 @@ with DAG(
                     batches['allocations'].append(
                         {
                             'id': allocationId,
-                            'clientId': int(obj['decodedParams']['From'][2:]),  # strip 'f0' prefix
+                            'clientId': int(clientId[2:]),  # strip 'f0' prefix
                             'providerId': allocation[0],
                             'pieceCid': extract_dag_cid(allocation[1]),
                             'pieceSize': allocation[2],
@@ -348,13 +425,42 @@ with DAG(
                         }
                     )
 
-            # allocation not from the datacap holder
-            if obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954:
-                print(f"allocation not from datacap holder matched for message")
-
             # claim 
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 9:
-                print(f"claim matched for message")
+                sectors = None
+                if obj['parent'] and 'Method' in obj['parent'] and obj['parent']['Method'] == 34:
+                    sectors = obj['decodedParamsParent']['SectorActivations']
+                if obj['parent'] and 'Method' in obj['parent'] and obj['parent']['Method'] == 35:
+                    sectors = obj['decodedParamsParent']['SectorUpdates']
+
+                dealIds = {}
+                if sectors:
+                    for sector in sectors:
+                        sectorNumber = None
+                        if obj['parent']['Method'] == 34:
+                            sectorNumber =sector['SectorNumber']
+                        if obj['parent']['Method'] == 35:
+                            sectorNumber = sector['Sector']
+                            
+                        for piece in sector['Pieces']:
+                            for notifyItem in piece['Notify']:
+                                if notifyItem['Address'] == 'f05':
+                                    dealIds[f"{piece['VerifiedAllocationKey']['Client']}_{piece['VerifiedAllocationKey']['ID']}_{sectorNumber}"] = loads(base64.b64decode(notifyItem['Payload']))
+
+                for sector in obj['decodedParams']['Sectors']:
+                    for claim in sector['Claims']:
+                        key = f"{claim['Client']}_{claim['AllocationId']}_{sector['Sector']}"
+                        dealId = dealIds.get(key, None)
+
+                        batches['claims'].append(
+                            {
+                                'id': claim['AllocationId'],
+                                'clientId': claim['Client'],
+                                'sector': sector['Sector'],
+                                'dealId': dealId,
+                                'sectorExpiry': sector['SectorExpiry']
+                            }
+                        )
 
             # create verifier (f080 multisig)
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
@@ -385,7 +491,7 @@ with DAG(
                     address = Address(functionParams.get('clientAddress'), CoinType.MAIN)
                     print(encode('f', address))
                     print(functionParams.get('amount'))
-                    
+
         print(batches)
 
     keys = list_keys()
