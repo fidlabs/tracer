@@ -30,8 +30,8 @@ CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "4754605"))    # Starting file number (1-based)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "3"))  # Number of files to process per run
+START_FROM = int(os.getenv("START_FROM", "5239937"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
@@ -290,15 +290,16 @@ with DAG(
 
                         subcall = find_subcall(
                             subcalls=trace_obj['ExecutionTrace']['Subcalls'], 
-                            matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ], ["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
+                            matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ]]
                             # matchers=[["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
                         )
                         
-                        subcall, parent = find_subcall_and_parent(
-                            subcalls=trace_obj['ExecutionTrace']['Subcalls'],
-                            parent= trace_obj['ExecutionTrace']['Msg'],
-                            matchers=[["f06", 9]]
-                        )
+                        if subcall is None:
+                            subcall, parent = find_subcall_and_parent(
+                                subcalls=trace_obj['ExecutionTrace']['Subcalls'],
+                                parent= trace_obj['ExecutionTrace']['Msg'],
+                                matchers=[["f06", 9]]
+                            )
 
                         if subcall:
                             msg = subcall['Msg']
@@ -310,7 +311,7 @@ with DAG(
                                         aux= verifregSubcall['MsgRct']
 
                             print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
-                            matches.append({"msg": msg, "aux": aux, "parent": parent})
+                            matches.append({"msg": msg, "aux": aux, "parent": parent, "baseMsg": trace_obj['Msg']})
                         else:
                             print(f"No f06 subcall in trace {i+1}")
 
@@ -368,7 +369,6 @@ with DAG(
 
         decodedParamsParent = None
 
-        print(obj['parent'])
         if obj['parent'] and 'Method' in obj['parent'] and 'Params' in obj['parent'] and (obj['parent']['Method'] == 35 or obj['parent']['Method'] == 34):
             try:
                 decodeParametersCmdParent = [
@@ -379,7 +379,6 @@ with DAG(
                     "27"
                 ]
                 resultDecodeParametersCmdParent = subprocess.run(decodeParametersCmdParent, capture_output=True, text=True, check=True)
-                print(resultDecodeParametersCmd)
                 decodedParamsParent = json.loads(resultDecodeParametersCmdParent.stdout.strip())
             except subprocess.CalledProcessError as e:
                 print(f"Failed to decode parent parameters for {obj}")
@@ -388,18 +387,17 @@ with DAG(
                 print(f"stderr: {e.stderr}")
                 raise
 
-        return {"msg": obj['msg'], "aux": obj["aux"], "parent": obj["parent"], "decodedParams": decodedParams, "decodedParamsParent": decodedParamsParent}
+        return {"msg": obj['msg'], "baseMsg": obj["baseMsg"], "aux": obj["aux"], "parent": obj["parent"], "decodedParams": decodedParams, "decodedParamsParent": decodedParamsParent}
 
 
     @task
     def output_results(decodedResults: dict) -> None:
-        batches = { "allocations": [], "claims": [] }
+        batches = { "allocations": [], "claims": [], "verifierAllowances": [], "clientAllowances": [] }
         for obj in decodedResults:
             # allocation
             if (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05") or (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954):
                 decodedReceipt = loads(base64.b64decode(obj['aux']['Return']))
                 decodedParams = loads(base64.b64decode(obj['decodedParams']['OperatorData']))
-                print(obj['decodedParams'])
                 clientId = ''
                 # Determine clientId based on method
                 # 3621052141 allocation from the datacap holder
@@ -441,56 +439,75 @@ with DAG(
                             sectorNumber =sector['SectorNumber']
                         if obj['parent']['Method'] == 35:
                             sectorNumber = sector['Sector']
-                            
-                        for piece in sector['Pieces']:
-                            for notifyItem in piece['Notify']:
-                                if notifyItem['Address'] == 'f05':
-                                    dealIds[f"{piece['VerifiedAllocationKey']['Client']}_{piece['VerifiedAllocationKey']['ID']}_{sectorNumber}"] = loads(base64.b64decode(notifyItem['Payload']))
+
+                        if sector['Pieces'] is not None:    
+                            for piece in sector['Pieces']:
+                                if piece['Notify'] is not None:
+                                    for notifyItem in piece['Notify']:
+                                        if notifyItem['Address'] == 'f05':
+                                            dealIds[f"{piece['VerifiedAllocationKey']['Client']}_{piece['VerifiedAllocationKey']['ID']}_{sectorNumber}"] = loads(base64.b64decode(notifyItem['Payload']))
 
                 for sector in obj['decodedParams']['Sectors']:
-                    for claim in sector['Claims']:
-                        key = f"{claim['Client']}_{claim['AllocationId']}_{sector['Sector']}"
-                        dealId = dealIds.get(key, None)
-
-                        batches['claims'].append(
-                            {
-                                'id': claim['AllocationId'],
-                                'clientId': claim['Client'],
-                                'sector': sector['Sector'],
-                                'dealId': dealId,
-                                'sectorExpiry': sector['SectorExpiry']
-                            }
-                        )
+                    if sector['Claims'] is not None:
+                        for claim in sector['Claims']:
+                            key = f"{claim['Client']}_{claim['AllocationId']}_{sector['Sector']}"
+                            dealId = dealIds.get(key, None)
+                            batches['claims'].append(
+                                {
+                                    'id': claim['AllocationId'],
+                                    'clientId': claim['Client'],
+                                    'providerId': int(obj['msg']['From'][2:]),
+                                    'sector': sector['Sector'],
+                                    'dealId': dealId,
+                                    'sectorExpiry': sector['SectorExpiry']
+                                }
+                            )
 
             # create verifier (f080 multisig)
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
-                print(f"create verifier matched for message")
+                batches['verifierAllowances'].append(
+                    {"verifier": obj['msg']['From'],"allowance": obj['decodedParams']['Allowance']}
+                )
 
             # create client meta-allocator
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 3916220144:
-                print(f"create client meta-allocator matched for message")
+                batches['clientAllowances'].append(
+                    {
+                        "virtualVerifier": obj['baseMsg']['To'],
+                        "client": obj['decodedParams']['Address'], 
+                        "allowance": obj['decodedParams']['Allowance'], 
+                        "verifier": obj['msg']['From']
+                    }
+                )
 
             # create client 
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 4:
-                print(f"create client matched for message")
+                batches['clientAllowances'].append(
+                    {
+                        "virtualVerifier": obj['msg']['From'],
+                        "client": obj['decodedParams']['Address'], 
+                        "allowance": obj['decodedParams']['Allowance'], 
+                        "verifier": obj['msg']['From']
+                    }
+                )
     
             # meta-allocator instance
-            if obj['msg']['To'] == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" and obj['msg']['Method'] == 3844450837:
-                print(f"meta-allocator matched for message")
-                hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
-                with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
-                    abi = json.load(f)
+            # if obj['msg']['To'] == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" and obj['msg']['Method'] == 3844450837:
+            #     print(f"meta-allocator matched for message")
+            #     hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
+            #     with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
+            #         abi = json.load(f)
             
-                w3 = Web3()
-                contract = w3.eth.contract(address=Web3.to_checksum_address('0x984376abd1ff5518b6ae9d065c40696ae916dc88'), abi=abi)
-                decodedContractFunction = contract.decode_function_input(hexEthTxInput)
-                functionName = decodedContractFunction[0].fn_name
-                functionParams = decodedContractFunction[1]
+            #     w3 = Web3()
+            #     contract = w3.eth.contract(address=Web3.to_checksum_address('0x984376abd1ff5518b6ae9d065c40696ae916dc88'), abi=abi)
+            #     decodedContractFunction = contract.decode_function_input(hexEthTxInput)
+            #     functionName = decodedContractFunction[0].fn_name
+            #     functionParams = decodedContractFunction[1]
 
-                if functionName == "addVerifiedClient":
-                    address = Address(functionParams.get('clientAddress'), CoinType.MAIN)
-                    print(encode('f', address))
-                    print(functionParams.get('amount'))
+            #     if functionName == "addVerifiedClient":
+            #         address = Address(functionParams.get('clientAddress'), CoinType.MAIN)
+            #         print(encode('f', address))
+            #         print(functionParams.get('amount'))
 
         print(batches)
 
