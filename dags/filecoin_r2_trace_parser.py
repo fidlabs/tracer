@@ -13,6 +13,7 @@ from web3.contract import Contract
 from filecoin_address import  encode, Address, CoinType
 from cbor2 import CBORTag, loads
 from multiformats import CID
+import psycopg
 
 from urllib.parse import quote
 
@@ -30,8 +31,8 @@ CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "3"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "5239937"))    # Starting file number (1-based)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
+START_FROM = int(os.getenv("START_FROM", "5180822"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
@@ -466,7 +467,7 @@ with DAG(
             # create verifier (f080 multisig)
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
                 batches['verifierAllowances'].append(
-                    {"verifier": obj['msg']['From'],"allowance": obj['decodedParams']['Allowance']}
+                    {"verifier": obj['decodedParams']['Address'],"dcSource": obj['msg']['From'],"allowance": obj['decodedParams']['Allowance']}
                 )
 
             # create client meta-allocator
@@ -509,7 +510,73 @@ with DAG(
             #         print(encode('f', address))
             #         print(functionParams.get('amount'))
 
-        print(batches)
+        with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
+            with conn.cursor() as cur:
+                # insert allocations
+                if batches['allocations']:
+                    cur.executemany(
+                        "INSERT INTO public.allocations (\"allocationId\", \"clientId\", \"providerId\", \"pieceCid\", \"pieceSize\", \"termMin\", \"termMax\", \"expiration\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (\"allocationId\") DO NOTHING;",
+                        [
+                            (
+                                alloc['id'],
+                                alloc['clientId'],
+                                alloc['providerId'],
+                                alloc['pieceCid'],
+                                alloc['pieceSize'],
+                                alloc['termMin'],
+                                alloc['termMax'],
+                                alloc['expiration'],
+                            )
+                            for alloc in batches['allocations']
+                        ]
+                    )
+
+                # insert claims
+                if batches['claims']:
+                    cur.executemany(
+                        "INSERT INTO public.deals (\"claimId\", \"clientId\", \"providerId\", \"sectorId\", \"dealId\", \"sectorExpiry\") VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
+                        [
+                            (
+                                claim['id'],
+                                claim['clientId'],
+                                claim['providerId'],
+                                claim['sector'],
+                                claim['dealId'],
+                                claim['sectorExpiry']
+                            )
+                            for claim in batches['claims']
+                        ]
+                    )
+
+                # insert verifier allowances
+                if batches['verifierAllowances']:
+                    cur.executemany(
+                        "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"dcSource\") VALUES (%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        [
+                            (
+                                va['verifier'],
+                                va['allowance'],
+                                va['dcSource']
+                            )
+                            for va in batches['verifierAllowances']
+                        ]
+                    )
+
+                # insert client allowances
+                if batches['clientAllowances']:
+                    cur.executemany(
+                        "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"dcSource\", \"isVirtual\") VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        [
+                            (
+                                ca['virtualVerifier'],
+                                ca['client'],
+                                ca['allowance'],
+                                ca['verifier'],
+                                ca['virtualVerifier'] != ca['verifier']
+                            )
+                            for ca in batches['clientAllowances']
+                        ]
+                    )
 
     keys = list_keys()
     results = process_trace.expand(obj=keys) 

@@ -56,7 +56,8 @@ RUN pip install --no-cache-dir \
     web3==7.14.0 \
     filecoin-address==0.1.2 \
     multiformats==0.3.1.post4 \
-    cbor2==5.7.1
+    cbor2==5.7.1 \
+    "psycopg[binary]"
 
 # Note: s2 Python package is for geometry, not compression
 # For S2 compression, we need to build/install s2 CLI tool or use alternative
