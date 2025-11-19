@@ -31,7 +31,7 @@ CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))  # Number of files to process per run
 START_FROM = int(os.getenv("START_FROM", "5180822"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
@@ -326,21 +326,9 @@ with DAG(
             print(f"stdout: {e.stdout}")
             print(f"stderr: {e.stderr}")
             raise
-
-    # Flatten the results and apply decode_parameters to each message
-    @task
-    def flatten_results(results_list):
-        """Flatten the list of lists into individual message objects"""
-        flattened = []
-        for result_group in results_list:
-            if isinstance(result_group, list):
-                flattened.extend(result_group)
-            else:
-                flattened.append(result_group)
-        return flattened
     
     @task
-    def decode_parameters(obj: dict) -> str:
+    def decode_parameters(messagesToDecode: dict) -> str:
         """
         Decode parameters using the Go executable with dynamic inputs.
         
@@ -350,49 +338,52 @@ with DAG(
         Returns:
             Decoded parameters as JSON string
         """
-        
-        try:
-            decodeParametersCmd = [
-                "/opt/airflow/plugins/goExecutables/decode_params",
-                find_actor_name(obj['msg']['To']),
-                str(obj['msg']['Method']),
-                obj['msg']['Params'],
-                "27"
-            ]
-            resultDecodeParametersCmd = subprocess.run(decodeParametersCmd, capture_output=True, text=True, check=True)
-            decodedParams = json.loads(resultDecodeParametersCmd.stdout.strip())
-        except subprocess.CalledProcessError as e:
-            print(f"Failed to decode parameters for {obj}")
-            print(f"Command: {' '.join(decodeParametersCmd)}")
-            print(f"stdout: {e.stdout}")
-            print(f"stderr: {e.stderr}")
-            raise
-
-        decodedParamsParent = None
-
-        if obj['parent'] and 'Method' in obj['parent'] and 'Params' in obj['parent'] and (obj['parent']['Method'] == 35 or obj['parent']['Method'] == 34):
+        decodedResults = []
+        for obj in messagesToDecode:
             try:
-                decodeParametersCmdParent = [
+                decodeParametersCmd = [
                     "/opt/airflow/plugins/goExecutables/decode_params",
-                    "storageminer",
-                    str(obj['parent']['Method']),
-                    obj['parent']['Params'],
+                    find_actor_name(obj['msg']['To']),
+                    str(obj['msg']['Method']),
+                    obj['msg']['Params'],
                     "27"
                 ]
-                resultDecodeParametersCmdParent = subprocess.run(decodeParametersCmdParent, capture_output=True, text=True, check=True)
-                decodedParamsParent = json.loads(resultDecodeParametersCmdParent.stdout.strip())
+                resultDecodeParametersCmd = subprocess.run(decodeParametersCmd, capture_output=True, text=True, check=True)
+                decodedParams = json.loads(resultDecodeParametersCmd.stdout.strip())
             except subprocess.CalledProcessError as e:
-                print(f"Failed to decode parent parameters for {obj}")
-                print(f"Command: {' '.join(decodeParametersCmdParent)}")
+                print(f"Failed to decode parameters for {obj}")
+                print(f"Command: {' '.join(decodeParametersCmd)}")
                 print(f"stdout: {e.stdout}")
                 print(f"stderr: {e.stderr}")
                 raise
 
-        return {"msg": obj['msg'], "baseMsg": obj["baseMsg"], "aux": obj["aux"], "parent": obj["parent"], "decodedParams": decodedParams, "decodedParamsParent": decodedParamsParent}
+            decodedParamsParent = None
 
+            if obj['parent'] and 'Method' in obj['parent'] and 'Params' in obj['parent'] and (obj['parent']['Method'] == 35 or obj['parent']['Method'] == 34):
+                try:
+                    decodeParametersCmdParent = [
+                        "/opt/airflow/plugins/goExecutables/decode_params",
+                        "storageminer",
+                        str(obj['parent']['Method']),
+                        obj['parent']['Params'],
+                        "27"
+                    ]
+                    resultDecodeParametersCmdParent = subprocess.run(decodeParametersCmdParent, capture_output=True, text=True, check=True)
+                    decodedParamsParent = json.loads(resultDecodeParametersCmdParent.stdout.strip())
+                except subprocess.CalledProcessError as e:
+                    print(f"Failed to decode parent parameters for {obj}")
+                    print(f"Command: {' '.join(decodeParametersCmdParent)}")
+                    print(f"stdout: {e.stdout}")
+                    print(f"stderr: {e.stderr}")
+                    raise
+
+            decodedResults.append({"msg": obj['msg'], "baseMsg": obj["baseMsg"], "aux": obj["aux"], "parent": obj["parent"], "decodedParams": decodedParams, "decodedParamsParent": decodedParamsParent})
+        print(decodedResults)
+        return decodedResults
 
     @task
     def output_results(decodedResults: dict) -> None:
+        print(decodedResults)
         batches = { "allocations": [], "claims": [], "verifierAllowances": [], "clientAllowances": [] }
         for obj in decodedResults:
             # allocation
@@ -532,6 +523,29 @@ with DAG(
                     )
 
                 # insert claims
+                # Build array of claim ids from batches['claims']
+                claim_ids = [claim['id'] for claim in batches['claims']]
+                allocations_dict = {}
+                if claim_ids:
+                    # Select existing allocations from the table
+                    cur.execute(
+                        "SELECT \"allocationId\", \"clientId\", \"providerId\", \"pieceCid\", \"pieceSize\", \"termMin\", \"termMax\", \"expiration\" FROM public.allocations WHERE \"allocationId\" = ANY(%s);",
+                        (claim_ids,)
+                    )
+                    rows = cur.fetchall()
+                    # Build dictionary with id as key and object as value
+                    for row in rows:
+                        allocations_dict[row[0]] = {
+                            'allocationId': row[0],
+                            'clientId': row[1],
+                            'providerId': row[2],
+                            'pieceCid': row[3],
+                            'pieceSize': row[4],
+                            'termMin': row[5],
+                            'termMax': row[6],
+                            'expiration': row[7]
+                        }
+                
                 if batches['claims']:
                     cur.executemany(
                         "INSERT INTO public.deals (\"claimId\", \"clientId\", \"providerId\", \"sectorId\", \"dealId\", \"sectorExpiry\") VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
@@ -580,7 +594,6 @@ with DAG(
 
     keys = list_keys()
     results = process_trace.expand(obj=keys) 
-    flattened = flatten_results(results)
-    decoded_results = decode_parameters.expand(obj=flattened)
-    output = output_results(decodedResults=decoded_results)
-    keys >> results >> flattened >> decoded_results >> output
+    decoded_results = decode_parameters.expand(messagesToDecode=results)
+    output = output_results.expand(decodedResults=decoded_results)
+    keys >> results >> decoded_results >> output
