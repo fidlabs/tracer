@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from airflow import DAG
 from airflow.decorators import task
 import subprocess
-import boto3
 import clickhouse_connect
 import json
 import base64
@@ -17,22 +16,13 @@ import psycopg
 import http.client
 from urllib.parse import urlparse
 
-# Configuration from environment variables
-R2_ACCOUNT_ID = os.environ["R2_ACCOUNT_ID"]
-R2_ACCESS_KEY_ID = os.environ["R2_ACCESS_KEY_ID"]
-R2_SECRET_ACCESS_KEY = os.environ["R2_SECRET_ACCESS_KEY"]
-R2_BUCKET = os.environ["R2_BUCKET"]
-R2_PREFIX = os.getenv("R2_PREFIX", "")
-R2_GLOB = os.getenv("R2_GLOB", "*.json.s2")  # e.g. traces_*.json.s2
-R2_ENDPOINT = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
 CH_HTTP = os.getenv("CH_HTTP", "http://clickhouse:8123")
 CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "5247910"))    # Starting file number (1-based)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "3"))  # Number of files to process per run
+START_FROM = int(os.getenv("START_FROM", "5239937"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
@@ -183,7 +173,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     default_args={"owner": "data-eng", "retries": 1},
-    tags=["filecoin","r2","s2","clickhouse","exactly-once-ish"]
+    tags=["filecoin","beryx","s2","clickhouse","exactly-once-ish"]
 ) as dag:
 
     @task
@@ -242,6 +232,7 @@ with DAG(
         Never reprocess (key,etag) if already success.
         """
         key = obj["key"]
+        height = obj["sequence_number"]
 
         # build common source pipeline
         # Note: s2d -c - means "decompress from stdin to stdout"
@@ -281,15 +272,28 @@ with DAG(
 
                         if subcall:
                             msg = subcall['Msg']
-                            aux = []
+                            verifRegUnivHookRct = []
                             if (msg['To'] == "f07" and msg['Method'] == 3621052141 and msg['From'] == "f05") or (msg['To'] == "f07" and msg['Method'] == 80475954):
                                 verifregSubcall = find_subcall(subcalls=subcall['Subcalls'], matchers=[["f06", 3726118371]])
                                 if verifregSubcall:
                                     if verifregSubcall['Msg']['From']=='f07':
-                                        aux= verifregSubcall['MsgRct']
+                                        verifRegUnivHookRct= verifregSubcall['MsgRct']
 
                             print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
-                            matches.append({"msg": msg, "aux": aux, "parent": parent, "baseMsg": trace_obj['Msg']})
+                            matches.append({
+                                "msg": msg, 
+                                "verifRegUnivHookRct": verifRegUnivHookRct, 
+                                "parent": parent, 
+                                "baseMsg": {
+                                    "To": trace_obj['Msg']['To'],
+                                    "From": trace_obj['Msg']['From'],
+                                    "Version": trace_obj['Msg']['Version'],
+                                    "Method": trace_obj['Msg']['Method'],
+                                    "Nonce": trace_obj['Msg']['Nonce'],
+                                    "MsgCid": trace_obj['MsgCid']["/"]
+                                    }, 
+                                "height": height
+                            })
                         else:
                             print(f"No f06 subcall in trace {i+1}")
 
@@ -354,7 +358,15 @@ with DAG(
                     print(f"stderr: {e.stderr}")
                     raise
 
-            decodedResults.append({"msg": obj['msg'], "baseMsg": obj["baseMsg"], "aux": obj["aux"], "parent": obj["parent"], "decodedParams": decodedParams, "decodedParamsParent": decodedParamsParent})
+            decodedResults.append({
+                "msg": obj['msg'], 
+                "baseMsg": obj["baseMsg"], 
+                "verifRegUnivHookRct": obj["verifRegUnivHookRct"], 
+                "parent": obj["parent"], 
+                "decodedParams": decodedParams, 
+                "decodedParamsParent": decodedParamsParent, 
+                "height": obj["height"]
+            })
         print(decodedResults)
         return decodedResults
 
@@ -365,7 +377,7 @@ with DAG(
         for obj in decodedResults:
             # allocation
             if (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05") or (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954):
-                decodedReceipt = loads(base64.b64decode(obj['aux']['Return']))
+                decodedReceipt = loads(base64.b64decode(obj['verifRegUnivHookRct']['Return']))
                 decodedParams = loads(base64.b64decode(obj['decodedParams']['OperatorData']))
                 clientId = ''
                 # Determine clientId based on method
@@ -435,7 +447,13 @@ with DAG(
             # create verifier (f080 multisig)
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
                 batches['verifierAllowances'].append(
-                    {"verifier": obj['decodedParams']['Address'],"dcSource": obj['msg']['From'],"allowance": obj['decodedParams']['Allowance']}
+                    {
+                        "verifier": obj['decodedParams']['Address'],
+                        "dcSource": obj['msg']['From'],
+                        "allowance": obj['decodedParams']['Allowance'],
+                        "msgCid": obj['baseMsg']['MsgCid'],
+                        "height": obj['height']
+                    }
                 )
 
             # create client meta-allocator
@@ -445,7 +463,9 @@ with DAG(
                         "virtualVerifier": obj['baseMsg']['To'],
                         "client": obj['decodedParams']['Address'], 
                         "allowance": obj['decodedParams']['Allowance'], 
-                        "verifier": obj['msg']['From']
+                        "verifier": obj['msg']['From'],
+                        "height": obj['height'],
+                        "msgCid": obj['baseMsg']['MsgCid']
                     }
                 )
 
@@ -456,7 +476,9 @@ with DAG(
                         "virtualVerifier": obj['msg']['From'],
                         "client": obj['decodedParams']['Address'], 
                         "allowance": obj['decodedParams']['Allowance'], 
-                        "verifier": obj['msg']['From']
+                        "verifier": obj['msg']['From'],
+                        "height": obj['height'],
+                        "msgCid": obj['baseMsg']['MsgCid']
                     }
                 )
     
@@ -557,12 +579,14 @@ with DAG(
                 # insert verifier allowances
                 if batches['verifierAllowances']:
                     cur.executemany(
-                        "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"dcSource\") VALUES (%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"dcSource\", \"msgCid\", \"height\") VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
                                 va['verifier'],
                                 va['allowance'],
-                                va['dcSource']
+                                va['dcSource'],
+                                va['msgCid'],
+                                va['height']
                             )
                             for va in batches['verifierAllowances']
                         ]
@@ -571,14 +595,16 @@ with DAG(
                 # insert client allowances
                 if batches['clientAllowances']:
                     cur.executemany(
-                        "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"dcSource\", \"isVirtual\") VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"dcSource\", \"isVirtual\", \"msgCid\", \"height\") VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
                                 ca['virtualVerifier'],
                                 ca['client'],
                                 ca['allowance'],
                                 ca['verifier'],
-                                ca['virtualVerifier'] != ca['verifier']
+                                ca['virtualVerifier'] != ca['verifier'],
+                                ca['msgCid'],
+                                ca['height']
                             )
                             for ca in batches['clientAllowances']
                         ]

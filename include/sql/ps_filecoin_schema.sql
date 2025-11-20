@@ -33,10 +33,13 @@ create table public.verifier_allowance
     "verifierId" varchar,
     height       integer,
     allowance    numeric,
-    "msgCID"     varchar,
+    "msgCid"     varchar,
     "isVirtual"  boolean default false                     not null,
     "dcSource"   varchar default 'f080'::character varying not null
 );
+
+create unique index verifier_allowance_pk
+    on public.verifier_allowance ("msgCid", "verifierId", height);
 
 create table public.verified_client_allowance
 (
@@ -47,10 +50,13 @@ create table public.verified_client_allowance
     "verifierId" varchar,
     height       integer,
     allowance    numeric,
-    "msgCID"     varchar,
+    "msgCid"     varchar,
     "isVirtual"  boolean default false                     not null,
     "dcSource"   varchar default 'f080'::character varying not null
 );
+
+create unique index verified_client_allowance_pk
+    on public.verified_client_allowance ("verifierId", "clientId", "msgCid", height);
 
 create table public.allocations
 (
