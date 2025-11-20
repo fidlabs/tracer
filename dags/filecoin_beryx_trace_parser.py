@@ -14,8 +14,8 @@ from filecoin_address import  encode, Address, CoinType
 from cbor2 import CBORTag, loads
 from multiformats import CID
 import psycopg
-
-from urllib.parse import quote
+import http.client
+from urllib.parse import urlparse
 
 # Configuration from environment variables
 R2_ACCOUNT_ID = os.environ["R2_ACCOUNT_ID"]
@@ -32,11 +32,21 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "5180822"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "5247910"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
 
+def url_is_valid_stdlib(url):
+    try:
+        parsed = urlparse(url)
+        conn = http.client.HTTPConnection(parsed.netloc, timeout=5)
+        conn.request("HEAD", parsed.path or "/")
+        response = conn.getresponse()
+        return response.status < 400
+    except Exception:
+        return False
+    
 def find_actor_name(actor_address_id):
     actorName = ""
     if actor_address_id == "f06":
@@ -167,7 +177,7 @@ def extract_dag_cid(obj):
         return data.hex()
     
 with DAG(
-    dag_id="filecoin_r2_s2_trace_parser",
+    dag_id="filecoin_beryx_trace_parser",
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
@@ -184,14 +194,7 @@ with DAG(
         This function generates BATCH_SIZE sequential keys starting from START_FROM.
         This is a test implementation and it will always process the same files on each run.
         """
-        s3 = boto3.client(
-            "s3",
-            aws_access_key_id=R2_ACCESS_KEY_ID,
-            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-            endpoint_url=R2_ENDPOINT,
-            region_name="auto",
-        )
-        
+       
         keys = []
         missing_count = 0
         current_num = START_FROM
@@ -203,44 +206,28 @@ with DAG(
         for i in range(BATCH_SIZE):
             # Generate the deterministic filename
             filename = f"traces_{current_num:012d}.json.s2"
-            key = f"{R2_PREFIX}traces/{filename}" if R2_PREFIX else f"traces/{filename}"
+            key = f"https://traces-filecoin.beryx.io/traces/{filename}"
             
             try:
                 # Check if the file exists by trying to get its metadata
-                response = s3.head_object(Bucket=R2_BUCKET, Key=key)
+                url_is_valid = url_is_valid_stdlib(key)
                 
-                # File exists, add it to our processing list
-                lm = response.get("LastModified")
-                if hasattr(lm, "timestamp"):
-                    lm_ts = datetime.fromtimestamp(lm.timestamp(), tz=timezone.utc)
-                else:
-                    lm_ts = datetime.now(timezone.utc)
+                if url_is_valid is True:
+                    keys.append({
+                        "key": key,
+                        "sequence_number": current_num
+                    })
                     
-                keys.append({
-                    "key": key,
-                    "etag": response.get("ETag", "").strip('"'),
-                    "size": int(response.get("ContentLength", 0)),
-                    "last_modified": lm_ts.isoformat(),
-                    "sequence_number": current_num
-                })
-                
-                print(f"✓ Found {filename} ({response.get('ContentLength', 0)} bytes)")
-                missing_count = 0  # Reset missing counter
-                
-            except s3.exceptions.NoSuchKey:
-                # File doesn't exist
-                missing_count += 1
-                print(f"✗ Missing {filename} (missing count: {missing_count})")
-                
-                # If we hit too many consecutive missing files, stop processing
-                if missing_count >= MAX_MISSING_WAIT:
-                    print(f"Stopping: {missing_count} consecutive missing files (max: {MAX_MISSING_WAIT})")
-                    break
+                    print(f"✓ Found {filename} to process.")
+                    missing_count = 0  # Reset missing counter
+                else:
+                    raise Exception("File does not exist")         
                     
             except Exception as e:
                 print(f"Error checking {filename}: {str(e)}")
                 missing_count += 1
                 if missing_count >= MAX_MISSING_WAIT:
+                    print(f"Stopping: {missing_count} consecutive missing files (max: {MAX_MISSING_WAIT})")
                     break
             
             current_num += 1
@@ -255,23 +242,13 @@ with DAG(
         Never reprocess (key,etag) if already success.
         """
         key = obj["key"]
-        etag = obj["etag"]
-        size = obj["size"]
-        lm   = obj["last_modified"]
-
-        def esc(s: str) -> str:
-            return s.replace("\\", "\\\\").replace("'", "\\'")
 
         # build common source pipeline
         # Note: s2d -c - means "decompress from stdin to stdout"
         # .Trace[] extracts each element from the Trace array
         # Full paths to all binaries and explicit PATH for subprocess
         src = (
-            f"AWS_ACCESS_KEY_ID={shlex.quote(R2_ACCESS_KEY_ID)} "
-            f"AWS_SECRET_ACCESS_KEY={shlex.quote(R2_SECRET_ACCESS_KEY)} "
-            f"PATH=/home/airflow/.local/bin:/usr/local/bin:/usr/bin:/bin "
-            f"/home/airflow/.local/bin/aws --endpoint-url {shlex.quote(R2_ENDPOINT)} s3 cp "
-            f"s3://{R2_BUCKET}/{shlex.quote(key)} - | /usr/local/bin/s2d -c - | /usr/bin/jq -c '.Trace[]'"
+            f" curl {shlex.quote(key)} | /usr/local/bin/s2d -c - | /usr/bin/jq -c '.Trace[]'"
         )
         
         # Execute the pipeline and parse the JSON output to extract keys
