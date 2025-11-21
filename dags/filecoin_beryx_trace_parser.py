@@ -22,7 +22,7 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "3"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "5239937"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "3903152"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
@@ -437,10 +437,13 @@ with DAG(
                                 {
                                     'id': claim['AllocationId'],
                                     'clientId': claim['Client'],
+                                    'pieceCid': claim['Data']['/'],
+                                    'pieceSize': claim['Size'],
                                     'providerId': int(obj['msg']['From'][2:]),
                                     'sector': sector['Sector'],
                                     'dealId': dealId,
-                                    'sectorExpiry': sector['SectorExpiry']
+                                    'sectorExpiry': sector['SectorExpiry'],
+                                    'termStart': obj['height'],
                                 }
                             )
 
@@ -449,7 +452,6 @@ with DAG(
                 batches['verifierAllowances'].append(
                     {
                         "verifier": obj['decodedParams']['Address'],
-                        "dcSource": obj['msg']['From'],
                         "allowance": obj['decodedParams']['Allowance'],
                         "msgCid": obj['baseMsg']['MsgCid'],
                         "height": obj['height']
@@ -460,7 +462,6 @@ with DAG(
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 3916220144:
                 batches['clientAllowances'].append(
                     {
-                        "virtualVerifier": obj['baseMsg']['To'],
                         "client": obj['decodedParams']['Address'], 
                         "allowance": obj['decodedParams']['Allowance'], 
                         "verifier": obj['msg']['From'],
@@ -473,7 +474,6 @@ with DAG(
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 4:
                 batches['clientAllowances'].append(
                     {
-                        "virtualVerifier": obj['msg']['From'],
                         "client": obj['decodedParams']['Address'], 
                         "allowance": obj['decodedParams']['Allowance'], 
                         "verifier": obj['msg']['From'],
@@ -543,7 +543,7 @@ with DAG(
                 
                 if batches['claims']:
                     for claim in batches['claims']:
-                        allocationData = {'pieceCid': None, 'pieceSize': None, 'termMin': None, 'termMax': None}
+                        allocationData = {'pieceCid': claim['pieceCid'], 'pieceSize': claim['pieceSize'], 'termMin': None, 'termMax': None}
 
                         alloc = allocations_dict.get(claim['id'], None)
                         if alloc:
@@ -558,7 +558,7 @@ with DAG(
                         claim['termMax'] = allocationData['termMax']
 
                     cur.executemany(
-                        "INSERT INTO public.deals (\"claimId\", \"clientId\", \"providerId\", \"sectorId\", \"dealId\", \"sectorExpiry\", \"pieceCid\", \"pieceSize\", \"termMin\", \"termMax\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
+                        "INSERT INTO public.deals (\"claimId\", \"clientId\", \"providerId\", \"sectorId\", \"dealId\", \"sectorExpiry\", \"pieceCid\", \"pieceSize\", \"termMin\", \"termMax\", \"termStart\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
                         [
                             (
                                 claim['id'],
@@ -571,6 +571,7 @@ with DAG(
                                 claim['pieceSize'],
                                 claim['termMin'],
                                 claim['termMax'],
+                                claim['termStart']
                             )
                             for claim in batches['claims']
                         ]
@@ -579,12 +580,11 @@ with DAG(
                 # insert verifier allowances
                 if batches['verifierAllowances']:
                     cur.executemany(
-                        "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"dcSource\", \"msgCid\", \"height\") VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"msgCid\", \"height\") VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
                                 va['verifier'],
                                 va['allowance'],
-                                va['dcSource'],
                                 va['msgCid'],
                                 va['height']
                             )
@@ -595,14 +595,12 @@ with DAG(
                 # insert client allowances
                 if batches['clientAllowances']:
                     cur.executemany(
-                        "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"dcSource\", \"isVirtual\", \"msgCid\", \"height\") VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"msgCid\", \"height\") VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
-                                ca['virtualVerifier'],
+                                ca['verifier'],
                                 ca['client'],
                                 ca['allowance'],
-                                ca['verifier'],
-                                ca['virtualVerifier'] != ca['verifier'],
                                 ca['msgCid'],
                                 ca['height']
                             )

@@ -33,9 +33,7 @@ create table public.verifier_allowance
     "verifierId" varchar,
     height       integer,
     allowance    numeric,
-    "msgCid"     varchar,
-    "isVirtual"  boolean default false                     not null,
-    "dcSource"   varchar default 'f080'::character varying not null
+    "msgCid"     varchar
 );
 
 create unique index verifier_allowance_pk
@@ -50,9 +48,7 @@ create table public.verified_client_allowance
     "verifierId" varchar,
     height       integer,
     allowance    numeric,
-    "msgCid"     varchar,
-    "isVirtual"  boolean default false                     not null,
-    "dcSource"   varchar default 'f080'::character varying not null
+    "msgCid"     varchar
 );
 
 create unique index verified_client_allowance_pk
