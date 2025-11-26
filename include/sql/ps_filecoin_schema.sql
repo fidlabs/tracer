@@ -68,4 +68,38 @@ create table public.allocations
     expiration     integer
 );
 
+create table public.deal_proposals
+(
+    id             serial
+        constraint dealProposals_id_pk
+            primary key,
+    "dealId"       integer default 0,
+    "client"     varchar,
+    "provider"   varchar,
+    "pieceCid"     varchar,
+    "pieceSize"    numeric,
+    "startEpoch"      integer,
+    "endEpoch"      integer,
+    "clientCollateral"    numeric,
+    "providerCollateral"    numeric,
+    "storagePricePerEpoch"    integer,
+    label          varchar,
+    verified       boolean
+);
 
+create unique index deal_proposals_dealid_index
+    on public.deal_proposals ("dealId");
+
+create table public.sector_activations
+(
+    id             serial
+        constraint sector_activations_id_pk
+            primary key,
+    "dealId"       integer default 0,
+    "providerId"   integer,
+    "activationHeight"     integer,
+    "sectorNumber"    integer
+);
+
+create unique index sector_activations_dealid_index
+    on public.sector_activations ("dealId");

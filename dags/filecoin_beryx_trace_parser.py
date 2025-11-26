@@ -21,8 +21,8 @@ CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "3"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "3903152"))    # Starting file number (1-based)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
+START_FROM = int(os.getenv("START_FROM", "3855300"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 SHELL = "bash"
@@ -41,8 +41,12 @@ def find_actor_name(actor_address_id):
     actorName = ""
     if actor_address_id == "f06":
         actorName = "verifiedregistry"
+    if actor_address_id == "f05":
+        actorName = "storagemarket"    
     if actor_address_id == "f07":
         actorName = "datacap"
+    if actor_address_id == "f04":
+        actorName = "storagepower"
     if actor_address_id == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja":
         actorName = "evm"
     return actorName
@@ -60,8 +64,7 @@ def find_subcall(subcalls, matchers=None):
         dict or None: First subcall object that matches the condition, or None if no match
     """
     if subcalls is None or matchers is None:
-        return None
-        
+        return None    
     for subcall in subcalls:
         msg_to = subcall['Msg']['To']
         msg_method = subcall['Msg']['Method']
@@ -256,22 +259,30 @@ with DAG(
                         trace_obj = json.loads(line)
                         # matchers format: [[destination, method1, method2, ...], ...]
                         parent = None
-
-                        subcall = find_subcall(
-                            subcalls=trace_obj['ExecutionTrace']['Subcalls'], 
+                        # matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ]]
+                        # matchers=[["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
+                        if height <=3855360:
+                            matchers=[["f05", 4], ["f06", 2, 4], ["f04", 8]]
+                            postNV22 = False
+                        else:
                             matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ]]
-                            # matchers=[["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
+                            postNV22 = True
+                                      
+                        subcall = find_subcall(
+                            subcalls=[trace_obj['ExecutionTrace']], 
+                            matchers=matchers
                         )
-                        
-                        if subcall is None:
+
+                        if subcall is None and postNV22 is True :
                             subcall, parent = find_subcall_and_parent(
-                                subcalls=trace_obj['ExecutionTrace']['Subcalls'],
+                                subcalls=[trace_obj['ExecutionTrace']],
                                 parent= trace_obj['ExecutionTrace']['Msg'],
                                 matchers=[["f06", 9]]
                             )
 
                         if subcall:
                             msg = subcall['Msg']
+                            msgRct = subcall['MsgRct']
                             verifRegUnivHookRct = []
                             if (msg['To'] == "f07" and msg['Method'] == 3621052141 and msg['From'] == "f05") or (msg['To'] == "f07" and msg['Method'] == 80475954):
                                 verifregSubcall = find_subcall(subcalls=subcall['Subcalls'], matchers=[["f06", 3726118371]])
@@ -282,6 +293,7 @@ with DAG(
                             print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
                             matches.append({
                                 "msg": msg, 
+                                "msgRct": msgRct,
                                 "verifRegUnivHookRct": verifRegUnivHookRct, 
                                 "parent": parent, 
                                 "baseMsg": {
@@ -295,7 +307,7 @@ with DAG(
                                 "height": height
                             })
                         else:
-                            print(f"No f06 subcall in trace {i+1}")
+                            print(f"No matched subcall in trace {i+1}")
 
                     except json.JSONDecodeError as e:
                         print(f"Failed to parse JSON on line {i+1}: {e}")
@@ -360,6 +372,7 @@ with DAG(
 
             decodedResults.append({
                 "msg": obj['msg'], 
+                "msgRct":  obj['msgRct'],
                 "baseMsg": obj["baseMsg"], 
                 "verifRegUnivHookRct": obj["verifRegUnivHookRct"], 
                 "parent": obj["parent"], 
@@ -372,8 +385,7 @@ with DAG(
 
     @task
     def output_results(decodedResults: dict) -> None:
-        print(decodedResults)
-        batches = { "allocations": [], "claims": [], "verifierAllowances": [], "clientAllowances": [] }
+        batches = { "allocations": [], "claims": [], "verifierAllowances": [], "clientAllowances": [], "proposals": [], "sectorActivations": [] }
         for obj in decodedResults:
             # allocation
             if (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05") or (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954):
@@ -482,6 +494,44 @@ with DAG(
                     }
                 )
     
+            # proposal 
+            if obj['msg']['To'] == "f05" and obj['msg']['Method'] == 4:
+                decodedReceipt = loads(base64.b64decode(obj['msgRct']['Return']))
+                proposalIndex = 0
+                for deal in obj['decodedParams']['Deals']:
+                    proposal = deal['Proposal']
+                    if proposal['VerifiedDeal'] is True:
+                        batches['proposals'].append(
+                            {
+                                'dealId': decodedReceipt[0][proposalIndex],
+                                'client': proposal['Client'],
+                                'pieceCid': proposal['PieceCID']['/'],
+                                'pieceSize': proposal['PieceSize'],
+                                'provider': proposal['Provider'],
+                                'label': proposal['Label'],
+                                'verified': proposal['VerifiedDeal'],
+                                'storagePricePerEpoch': proposal['StoragePricePerEpoch'],
+                                'clientCollateral': proposal['ClientCollateral'],
+                                'providerCollateral': proposal['ProviderCollateral'],
+                                'startEpoch': proposal['StartEpoch'],
+                                'endEpoch': proposal['EndEpoch'],
+                            }
+                        )
+                    proposalIndex += 1
+
+            # sector activations 
+            if obj['msg']['To'] == "f04" and obj['msg']['Method'] == 8:
+                if obj['decodedParams']['DealIDs'] is not None:
+                    for dealId in obj['decodedParams']['DealIDs']:
+                        batches['sectorActivations'].append(
+                            {
+                                'dealId': dealId,
+                                'providerId': int(obj['decodedParams']['Miner']),
+                                'activationHeight': obj['height'],
+                                'sectorNumber': int(obj['decodedParams']['Number'])
+                            }
+                        )  
+
             # meta-allocator instance
             # if obj['msg']['To'] == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" and obj['msg']['Method'] == 3844450837:
             #     print(f"meta-allocator matched for message")
@@ -608,6 +658,111 @@ with DAG(
                         ]
                     )
 
+                # insert proposals
+                if batches['proposals']:
+                    cur.executemany(
+                        "INSERT INTO public.deal_proposals (\"dealId\", \"client\", \"pieceCid\", \"pieceSize\", \"provider\", label, verified, \"storagePricePerEpoch\", \"clientCollateral\", \"providerCollateral\", \"startEpoch\", \"endEpoch\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (\"dealId\") DO NOTHING;",
+                        [
+                            (
+                                prop['dealId'],
+                                prop['client'],
+                                prop['pieceCid'],
+                                prop['pieceSize'],
+                                prop['provider'],
+                                prop['label'],
+                                prop['verified'],
+                                prop['storagePricePerEpoch'],
+                                prop['clientCollateral'],
+                                prop['providerCollateral'],
+                                prop['startEpoch'],
+                                prop['endEpoch']
+                            )
+                            for prop in batches['proposals']
+                        ]
+                    )
+
+                # insert sector activations
+                # Build array of deal ids from batches['sectorActivations']
+                deal_ids = [sectorActivation['dealId'] for sectorActivation in batches['sectorActivations']]
+                proposals_dict = {}
+                if deal_ids:
+                    # Select existing allocations from the table
+                    cur.execute(
+                       "SELECT \"dealId\", \"client\", \"provider\", \"pieceCid\", \"pieceSize\", \"startEpoch\", \"endEpoch\", \"clientCollateral\", \"providerCollateral\", \"storagePricePerEpoch\", label, verified FROM public.deal_proposals WHERE \"dealId\" = ANY(%s);",
+                        (deal_ids,)
+                    )
+                    rows = cur.fetchall()
+                    # Build dictionary with id as key and object as value
+                    for row in rows:
+                        proposals_dict[row[0]] = {
+                            'client': row[1],
+                            'provider': row[2],
+                            'pieceCid': row[3],
+                            'pieceSize': row[4],
+                            'startEpoch': row[5],
+                            'endEpoch': row[6],
+                            'clientCollateral': row[7],
+                            'providerCollateral': row[8],
+                            'storagePricePerEpoch': row[9],
+                            'label': row[10],
+                            'verified': row[11],
+                        }
+                
+                print(proposals_dict)
+                if batches['sectorActivations']:
+                    dealsToInsert = []
+                    sectorActivationsToInsert = []
+                    
+                    for sectorActivation in batches['sectorActivations']:
+                        proposal = proposals_dict.get(sectorActivation['dealId'], None)
+                        
+                        if proposal:
+                            dealsToInsert.append({
+                                **sectorActivation,
+                                "pieceCid": proposal['pieceCid'],
+                                "pieceSize": proposal['pieceSize'],
+                                "startEpoch": proposal['startEpoch'],
+                                "endEpoch": proposal['endEpoch'],
+                            })
+                        else:
+                            sectorActivationsToInsert.append(sectorActivation)
+                            print(f"Warning: dealId {sectorActivation['dealId']} not found in deal proposals table.")
+
+                    cur.executemany(
+                        "INSERT INTO public.deals (\"claimId\", \"clientId\", \"providerId\", \"sectorId\", \"dealId\", \"sectorExpiry\", \"pieceCid\", \"pieceSize\", \"termMin\", \"termMax\", \"termStart\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
+                        [
+                            (
+                                0,
+                                1,
+                                deal['providerId'],
+                                deal['sectorNumber'],
+                                deal['dealId'],
+                                0,
+                                deal['pieceCid'],
+                                deal['pieceSize'],
+                                deal['startEpoch'],
+                                deal['endEpoch'],
+                                deal['activationHeight']
+                            )
+                            for deal in dealsToInsert
+                        ]
+                    )
+
+                    cur.executemany(
+                        "INSERT INTO public.sector_activations (\"dealId\", \"providerId\", \"activationHeight\", \"sectorNumber\") VALUES (%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
+                        [
+                            (
+                                sectorActivation['dealId'],
+                                sectorActivation['providerId'],
+                                sectorActivation['activationHeight'],
+                                sectorActivation['sectorNumber']
+                            )
+                            for sectorActivation in sectorActivationsToInsert
+                        ]
+                    )
+
+
+                    
     keys = list_keys()
     results = process_trace.expand(obj=keys) 
     decoded_results = decode_parameters.expand(messagesToDecode=results)
