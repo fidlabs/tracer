@@ -74,8 +74,8 @@ create table public.deal_proposals
         constraint dealProposals_id_pk
             primary key,
     "dealId"       integer default 0,
-    "client"     varchar,
-    "provider"   varchar,
+    "clientId"     varchar,
+    "providerId"   varchar,
     "pieceCid"     varchar,
     "pieceSize"    numeric,
     "startEpoch"      integer,
@@ -103,3 +103,12 @@ create table public.sector_activations
 
 create unique index sector_activations_dealid_index
     on public.sector_activations ("dealId");
+
+create table public.actors
+(
+    id           serial,
+    "addressId"  integer,
+    address      varchar,
+    "addressEth" varchar
+);
+

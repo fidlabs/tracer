@@ -14,6 +14,10 @@ x-airflow-env: &airflow-env
   R2_PREFIX: ${R2_PREFIX:-}
   R2_GLOB: ${R2_GLOB:-*.json.s2}
   
+  #Lotus API configuration
+  LOTUS_API_URL: ${LOTUS_API_URL}
+  LOTUS_AUTH_TOKEN: ${LOTUS_AUTH_TOKEN}
+  
   # Optional: build an Airflow "aws_r2" connection automatically (UI also works)
   AIRFLOW_CONN_AWS_R2: >-
     aws://?aws_access_key_id=${R2_ACCESS_KEY_ID}&aws_secret_access_key=${R2_SECRET_ACCESS_KEY}

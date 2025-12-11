@@ -15,6 +15,10 @@ from multiformats import CID
 import psycopg
 import http.client
 from urllib.parse import urlparse
+import requests
+
+LOTUS_API_URL = os.environ["LOTUS_API_URL"]
+LOTUS_AUTH_TOKEN = os.environ["LOTUS_AUTH_TOKEN"]
 
 CH_HTTP = os.getenv("CH_HTTP", "http://clickhouse:8123")
 CH_HOST = os.getenv("CH_HOST", "clickhouse")
@@ -22,10 +26,104 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "3855300"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "5239937"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
+
 SHELL = "bash"
+
+def address_is_id(address: str | int) -> bool:
+    if isinstance(address, int):
+        return True
+    if isinstance(address, str) and (address.startswith("f0") or address.startswith("t0")):
+        return True
+    return False
+
+def address_to_id(address: str | int) -> int:
+    if isinstance(address, int):
+        return address
+    if isinstance(address, str) and (address.startswith("f0") or address.startswith("t0")):
+        return int(address[2:])
+    return 0
+
+def normalize_address_to_id(address: str | int, addressDictionary, addressIdDictionary) -> int:
+    result = 0
+    if isinstance(address, int):
+        result = address
+    if isinstance(address, str) and address.startswith("f0"):
+        result = int(address[2:])
+
+    print(addressIdDictionary)
+    print(result)
+    if result != 0:
+        if result in addressIdDictionary:
+            print("Found in addressIdDictionary")
+            addressStr = addressIdDictionary[result]
+            if (addressIdDictionary[result] == "" or addressIdDictionary[result] is None):
+                addressStr = lotus_api_call(method="Filecoin.StateAccountKey", params=[f"f0{result}", None])
+                if isinstance(addressStr, str):
+                    addressIdDictionary[result] = addressStr
+                    with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "update actors set address = %s, \"addressEth\" = %s where \"addressId\" = %s",
+                                (addressStr, None, result)
+                            )
+                    
+        else:
+            print("Not found in addressIdDictionary, making Lotus API call")
+            addressStr = lotus_api_call(method="Filecoin.StateAccountKey", params=[f"f0{result}", None])
+            print (result, addressStr, None)
+            if isinstance(addressStr, str):
+                addressIdDictionary[result] = addressStr
+                with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "insert into actors (\"addressId\", address, \"addressEth\") values (%s, %s, %s)",
+                            (result, addressStr, None)
+                        )
+        return result, addressDictionary, addressIdDictionary
+
+    if address in addressDictionary:
+        result = addressDictionary[address]   
+
+    if result == 0:
+        if isinstance(address, str) and (address.startswith("f1") or address.startswith("f3")):
+            lotus_api_call_result = lotus_api_call(method="Filecoin.StateLookupID", params=[address, None])
+            if (isinstance(lotus_api_call_result, str) and lotus_api_call_result.startswith("f0")):
+                result = int(lotus_api_call_result[2:])
+                addressDictionary[address] = result
+                with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "insert into actors (\"addressId\", address, \"addressEth\") values (%s, %s, %s)",
+                            (result, address, None)
+                        )
+                
+            
+    return result, addressDictionary, addressIdDictionary
+
+def lotus_api_call(method: str, params: list):
+    print(f"Making Lotus API call: {method} with params: {params}")
+    print(f"Using LOTUS_API_URL: {LOTUS_API_URL}")
+    print(f"Using LOTUS_AUTH_TOKEN: {LOTUS_AUTH_TOKEN[:10]}...")  # Print only the beginning for security
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': LOTUS_AUTH_TOKEN
+    }
+    
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params
+    }
+    
+    response = requests.post(LOTUS_API_URL, headers=headers, json=payload)
+    response.raise_for_status()
+    
+    result = response.json()
+    return result.get('result')
 
 def url_is_valid_stdlib(url):
     try:
@@ -37,6 +135,43 @@ def url_is_valid_stdlib(url):
     except Exception:
         return False
     
+def get_network_version( height: int) -> str:
+    """
+    Returns the Filecoin network version for a given block height.
+    """
+    network_upgrades_summary = [
+        {"upgrade": 6,    "name": "Kumquat",      "actorsVersion": "v2.2.0",  "epoch": 170000},
+        {"upgrade": 7,    "name": "Calico",       "actorsVersion": "v2.3.2",  "epoch": 265200},
+        {"upgrade": 8,    "name": "Persian",      "actorsVersion": "v2.3.2",  "epoch": 272400},
+        {"upgrade": 9,    "name": "Orange",       "actorsVersion": "v2.3.3",  "epoch": 336458},
+        {"upgrade": "9.5","name": "Claus",        "actorsVersion": "v2.3.3",  "epoch": 343200},
+        {"upgrade": 10,   "name": "Trust",        "actorsVersion": "v3.0.3",  "epoch": 550321},
+        {"upgrade": 11,   "name": "Norwegian",    "actorsVersion": "v3.1.0",  "epoch": 665280},
+        {"upgrade": 12,   "name": "Turbo",        "actorsVersion": "v4.0.0",  "epoch": 712320},
+        {"upgrade": 13,   "name": "HyperDrive",   "actorsVersion": "v5.0.0",  "epoch": 892800},
+        {"upgrade": 14,   "name": "Chocolate",    "actorsVersion": "v6.0.0",  "epoch": 1231620},
+        {"upgrade": 15,   "name": "OhSnap",       "actorsVersion": "v7.0.0",  "epoch": 1594680},
+        {"upgrade": 16,   "name": "Skyr",         "actorsVersion": "v8.0.0",  "epoch": 1960320},
+        {"upgrade": 17,   "name": "Shark",        "actorsVersion": "v9.0.0",  "epoch": 2383680},
+        {"upgrade": 18,   "name": "Hygge",        "actorsVersion": "v10.0.0", "epoch": 2683348},
+        {"upgrade": 19,   "name": "Lightning",    "actorsVersion": "v11.0.0", "epoch": 2809800},
+        {"upgrade": 20,   "name": "Thunder",      "actorsVersion": "v11.0.0", "epoch": 2870280},
+        {"upgrade": 21,   "name": "Watermelon",   "actorsVersion": "v12.0.0", "epoch": 3469380},
+        {"upgrade": 22,   "name": "Dragon",       "actorsVersion": "v13.0.0", "epoch": 3817920},
+        {"upgrade": 23,   "name": "Waffle",       "actorsVersion": "v14.0.0", "epoch": 4154640},
+        {"upgrade": 24,   "name": "Tuk Tuk",      "actorsVersion": "v15.0.0", "epoch": 4461240},
+        {"upgrade": 25,   "name": "Teep",         "actorsVersion": "v16.0.0", "epoch": 4867320},
+        {"upgrade": 26,   "name": "Tock",         "actorsVersion": "v16.0.0", "epoch": 5126520},
+        {"upgrade": 27,   "name": "Golden Week",  "actorsVersion": "v17.0.0", "epoch": 5348280} 
+    ]
+    network_version = 0
+    for upgrade in network_upgrades_summary:
+        if height >= upgrade["epoch"]:
+            network_version = upgrade["upgrade"]
+        else:
+            break
+    return str(network_version)
+    
 def find_actor_name(actor_address_id):
     actorName = ""
     if actor_address_id == "f06":
@@ -47,6 +182,8 @@ def find_actor_name(actor_address_id):
         actorName = "datacap"
     if actor_address_id == "f04":
         actorName = "storagepower"
+    if actor_address_id == "f010":
+        actorName = "eam"
     if actor_address_id == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja":
         actorName = "evm"
     return actorName
@@ -265,7 +402,8 @@ with DAG(
                             matchers=[["f05", 4], ["f06", 2, 4], ["f04", 8]]
                             postNV22 = False
                         else:
-                            matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ]]
+                            matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ], ["f010", 3]]
+                            # matchers=[["f010", 3]]
                             postNV22 = True
                                       
                         subcall = find_subcall(
@@ -339,7 +477,7 @@ with DAG(
                     find_actor_name(obj['msg']['To']),
                     str(obj['msg']['Method']),
                     obj['msg']['Params'],
-                    "27"
+                    get_network_version( obj['height'])
                 ]
                 resultDecodeParametersCmd = subprocess.run(decodeParametersCmd, capture_output=True, text=True, check=True)
                 decodedParams = json.loads(resultDecodeParametersCmd.stdout.strip())
@@ -359,7 +497,7 @@ with DAG(
                         "storageminer",
                         str(obj['parent']['Method']),
                         obj['parent']['Params'],
-                        "27"
+                        get_network_version( obj['height'])
                     ]
                     resultDecodeParametersCmdParent = subprocess.run(decodeParametersCmdParent, capture_output=True, text=True, check=True)
                     decodedParamsParent = json.loads(resultDecodeParametersCmdParent.stdout.strip())
@@ -385,7 +523,7 @@ with DAG(
 
     @task
     def output_results(decodedResults: dict) -> None:
-        batches = { "allocations": [], "claims": [], "verifierAllowances": [], "clientAllowances": [], "proposals": [], "sectorActivations": [] }
+        batches = { "allocations": [], "claims": [], "verifierAllowances": [], "clientAllowances": [], "proposals": [], "sectorActivations": [], "metaAllocators": [], "clientContracts": [] }
         for obj in decodedResults:
             # allocation
             if (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05") or (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954):
@@ -463,7 +601,7 @@ with DAG(
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
                 batches['verifierAllowances'].append(
                     {
-                        "verifier": obj['decodedParams']['Address'],
+                        "verifierId": obj['decodedParams']['Address'],
                         "allowance": obj['decodedParams']['Allowance'],
                         "msgCid": obj['baseMsg']['MsgCid'],
                         "height": obj['height']
@@ -474,9 +612,9 @@ with DAG(
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 3916220144:
                 batches['clientAllowances'].append(
                     {
-                        "client": obj['decodedParams']['Address'], 
+                        "clientId": obj['decodedParams']['Address'], 
                         "allowance": obj['decodedParams']['Allowance'], 
-                        "verifier": obj['msg']['From'],
+                        "verifierId": obj['msg']['From'],
                         "height": obj['height'],
                         "msgCid": obj['baseMsg']['MsgCid']
                     }
@@ -486,9 +624,9 @@ with DAG(
             if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 4:
                 batches['clientAllowances'].append(
                     {
-                        "client": obj['decodedParams']['Address'], 
+                        "clientId": obj['decodedParams']['Address'], 
                         "allowance": obj['decodedParams']['Allowance'], 
-                        "verifier": obj['msg']['From'],
+                        "verifierId": obj['msg']['From'],
                         "height": obj['height'],
                         "msgCid": obj['baseMsg']['MsgCid']
                     }
@@ -504,10 +642,10 @@ with DAG(
                         batches['proposals'].append(
                             {
                                 'dealId': decodedReceipt[0][proposalIndex],
-                                'client': proposal['Client'],
+                                'clientId': proposal['Client'],
                                 'pieceCid': proposal['PieceCID']['/'],
                                 'pieceSize': proposal['PieceSize'],
-                                'provider': proposal['Provider'],
+                                'providerId': proposal['Provider'],
                                 'label': proposal['Label'],
                                 'verified': proposal['VerifiedDeal'],
                                 'storagePricePerEpoch': proposal['StoragePricePerEpoch'],
@@ -532,6 +670,32 @@ with DAG(
                             }
                         )  
 
+            # sector activations 
+            if obj['msg']['To'] == "f010" and obj['msg']['Method'] == 3 and obj['msgRct']['ExitCode'] == 0 and (obj['msg']['From'] == "f03239905" or obj['msg']['From'] == "f03136590"):
+                decodedReceipt = loads(base64.b64decode(obj['msgRct']['Return']))
+
+                addressId = decodedReceipt[0]
+                address = Address(decodedReceipt[1], CoinType.MAIN)
+                addressEth = decodedReceipt[2]
+
+                if (obj['msg']['From'] == "f03239905"):
+                    batches['clientContracts'].append(
+                            {
+                                'addressId': addressId,
+                                'address': encode('f', address),
+                                'addressEth': "0x" + addressEth.hex()
+                            }
+                        )  
+
+                if (obj['msg']['From'] == "f03136590"):
+                     batches['metaAllocators'].append(
+                            {
+                                'addressId': addressId,
+                                'address': encode('f', address),
+                                'addressEth': "0x" + addressEth.hex()
+                            }
+                        )  
+
             # meta-allocator instance
             # if obj['msg']['To'] == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" and obj['msg']['Method'] == 3844450837:
             #     print(f"meta-allocator matched for message")
@@ -552,6 +716,64 @@ with DAG(
 
         with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
             with conn.cursor() as cur:
+                # normalize addresses, replace everything with IDs (strip 'f0' prefix and convert to int)
+                addressesToSearchInDb = []
+                addressIdsToSearchInDb = []
+                # go through each object in batches and collect all addresses
+
+                fieldsToNormalize = ['clientId', 'verifierId'] 
+                for key in batches:
+                    if batches[key]:
+                        for item in batches[key]:
+                            for field in fieldsToNormalize:
+                                if (field in item and item[field] is not None ): 
+                                    if not address_is_id(item[field]):
+                                        if not item[field] in addressesToSearchInDb:
+                                            addressesToSearchInDb.append(item[field])  
+                                    else:  
+                                        addressId = address_to_id(item[field])
+                                        if addressId != 0 and not addressId in addressIdsToSearchInDb:
+                                            addressIdsToSearchInDb.append(addressId)
+
+                print(f"Normalizing {len(addressesToSearchInDb)} addresses...")
+                cur.execute(
+                        "SELECT \"address\", \"addressId\" FROM public.actors WHERE \"address\" = ANY(%s);",
+                        (addressesToSearchInDb,)
+                    )
+                rows = cur.fetchall()         
+                print(f"Found {len(rows)} addresses in actors table for normalization.")
+
+                address_mapping = {}
+                for row in rows:
+                    address_mapping[row[0]] = row[1]  # address -> id
+
+                cur.execute(
+                        "SELECT \"address\", \"addressId\" FROM public.actors WHERE \"addressId\" = ANY(%s);",
+                        (addressIdsToSearchInDb,)
+                    )
+                rows = cur.fetchall()         
+                print(f"Found {len(rows)} addresses in actors table for normalization.")
+
+                addressId_mapping = {}
+                for row in rows:
+                    addressId_mapping[row[1]] = row[0]  # id -> address
+
+                for key in batches:
+                    if batches[key]:
+                        for item in batches[key]:
+                            for field in fieldsToNormalize:
+                                if (field in item and item[field] is not None) :
+                                    normalizedAddress, address_mapping, addressId_mapping = normalize_address_to_id(item[field], address_mapping, addressId_mapping)
+                                    item[field] = normalizedAddress
+
+                fieldsToNormalizeWithoutCaching = ['providerId']
+                for key in batches:
+                    if batches[key]:
+                        for item in batches[key]:
+                            for field in fieldsToNormalizeWithoutCaching:
+                                if (field in item and item[field] is not None) :
+                                    item[field] = address_to_id(item[field])
+
                 # insert allocations
                 if batches['allocations']:
                     cur.executemany(
@@ -633,7 +855,7 @@ with DAG(
                         "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"msgCid\", \"height\") VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
-                                va['verifier'],
+                                va['verifierId'],
                                 va['allowance'],
                                 va['msgCid'],
                                 va['height']
@@ -648,8 +870,8 @@ with DAG(
                         "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"msgCid\", \"height\") VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
-                                ca['verifier'],
-                                ca['client'],
+                                ca['verifierId'],
+                                ca['clientId'],
                                 ca['allowance'],
                                 ca['msgCid'],
                                 ca['height']
@@ -661,14 +883,14 @@ with DAG(
                 # insert proposals
                 if batches['proposals']:
                     cur.executemany(
-                        "INSERT INTO public.deal_proposals (\"dealId\", \"client\", \"pieceCid\", \"pieceSize\", \"provider\", label, verified, \"storagePricePerEpoch\", \"clientCollateral\", \"providerCollateral\", \"startEpoch\", \"endEpoch\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (\"dealId\") DO NOTHING;",
+                        "INSERT INTO public.deal_proposals (\"dealId\", \"clientId\", \"pieceCid\", \"pieceSize\", \"providerId\", label, verified, \"storagePricePerEpoch\", \"clientCollateral\", \"providerCollateral\", \"startEpoch\", \"endEpoch\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (\"dealId\") DO NOTHING;",
                         [
                             (
                                 prop['dealId'],
-                                prop['client'],
+                                prop['clientId'],
                                 prop['pieceCid'],
                                 prop['pieceSize'],
-                                prop['provider'],
+                                prop['providerId'],
                                 prop['label'],
                                 prop['verified'],
                                 prop['storagePricePerEpoch'],
@@ -688,15 +910,15 @@ with DAG(
                 if deal_ids:
                     # Select existing allocations from the table
                     cur.execute(
-                       "SELECT \"dealId\", \"client\", \"provider\", \"pieceCid\", \"pieceSize\", \"startEpoch\", \"endEpoch\", \"clientCollateral\", \"providerCollateral\", \"storagePricePerEpoch\", label, verified FROM public.deal_proposals WHERE \"dealId\" = ANY(%s);",
+                       "SELECT \"dealId\", \"clientId\", \"providerId\", \"pieceCid\", \"pieceSize\", \"startEpoch\", \"endEpoch\", \"clientCollateral\", \"providerCollateral\", \"storagePricePerEpoch\", label, verified FROM public.deal_proposals WHERE \"dealId\" = ANY(%s);",
                         (deal_ids,)
                     )
                     rows = cur.fetchall()
                     # Build dictionary with id as key and object as value
                     for row in rows:
                         proposals_dict[row[0]] = {
-                            'client': row[1],
-                            'provider': row[2],
+                            'clientId': row[1],
+                            'providerId': row[2],
                             'pieceCid': row[3],
                             'pieceSize': row[4],
                             'startEpoch': row[5],
@@ -708,7 +930,6 @@ with DAG(
                             'verified': row[11],
                         }
                 
-                print(proposals_dict)
                 if batches['sectorActivations']:
                     dealsToInsert = []
                     sectorActivationsToInsert = []
@@ -758,6 +979,34 @@ with DAG(
                                 sectorActivation['sectorNumber']
                             )
                             for sectorActivation in sectorActivationsToInsert
+                        ]
+                    )
+
+                # insert metaAllocators
+                if batches['metaAllocators']:
+                    cur.executemany(
+                        "INSERT INTO public.meta_allocators (\"addressId\", \"address\", \"addressEth\") VALUES (%s,%s,%s) ON CONFLICT (\"addressId\") DO NOTHING;",
+                        [
+                            (
+                                prop['addressId'],
+                                prop['address'],
+                                prop['addressEth'],
+                            )
+                            for prop in batches['metaAllocators']
+                        ]
+                    )
+
+                # insert clientContracts
+                if batches['clientContracts']:
+                    cur.executemany(
+                        "INSERT INTO public.client_contracts (\"addressId\", \"address\", \"addressEth\") VALUES (%s,%s,%s) ON CONFLICT (\"addressId\") DO NOTHING;",
+                        [
+                            (
+                                prop['addressId'],
+                                prop['address'],
+                                prop['addressEth'],
+                            )
+                            for prop in batches['clientContracts']
                         ]
                     )
 
