@@ -9,7 +9,7 @@ import json
 import base64
 from web3 import Web3
 from web3.contract import Contract
-from filecoin_address import  encode, Address, CoinType
+from filecoin_address import  encode, Address, CoinType, delegated_from_eth_address
 from cbor2 import CBORTag, loads
 from multiformats import CID
 import psycopg
@@ -26,11 +26,18 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "5239937"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "5182191"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 
 SHELL = "bash"
+def eth_address_to_fil_native(address: str) -> str:
+    has_prefix = address.startswith('0xff0000000000000000000000')              
+    if has_prefix:
+        filNativeAddress = "f0" + str(int.from_bytes(bytes.fromhex(address[26:]), byteorder="big", signed=False))
+    else:
+        filNativeAddress = delegated_from_eth_address(address)
+    return filNativeAddress
 
 def address_is_id(address: str | int) -> bool:
     if isinstance(address, int):
@@ -53,15 +60,16 @@ def normalize_address_to_id(address: str | int, addressDictionary, addressIdDict
     if isinstance(address, str) and address.startswith("f0"):
         result = int(address[2:])
 
-    print(addressIdDictionary)
-    print(result)
     if result != 0:
         if result in addressIdDictionary:
-            print("Found in addressIdDictionary")
+            print(f"Found in addressIdDictionary {result}")
             addressStr = addressIdDictionary[result]
             if (addressIdDictionary[result] == "" or addressIdDictionary[result] is None):
                 addressStr = lotus_api_call(method="Filecoin.StateAccountKey", params=[f"f0{result}", None])
-                if isinstance(addressStr, str):
+                if not isinstance(addressStr, str) or addressStr.startswith("failed"):
+                    addressStr = lotus_api_call(method="Filecoin.StateLookupRobustAddress", params=[f"f0{result}", None])
+
+                if isinstance(addressStr, str) and addressStr.startswith("f"):
                     addressIdDictionary[result] = addressStr
                     with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
                         with conn.cursor() as cur:
@@ -71,10 +79,12 @@ def normalize_address_to_id(address: str | int, addressDictionary, addressIdDict
                             )
                     
         else:
-            print("Not found in addressIdDictionary, making Lotus API call")
+            print(f"Not found in addressIdDictionary, making Lotus API call {result}")
             addressStr = lotus_api_call(method="Filecoin.StateAccountKey", params=[f"f0{result}", None])
-            print (result, addressStr, None)
-            if isinstance(addressStr, str):
+            if not isinstance(addressStr, str) or addressStr.startswith("failed"):
+                    addressStr = lotus_api_call(method="Filecoin.StateLookupRobustAddress", params=[f"f0{result}", None])
+
+            if isinstance(addressStr, str) and addressStr.startswith("f"):
                 addressIdDictionary[result] = addressStr
                 with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
                     with conn.cursor() as cur:
@@ -82,12 +92,14 @@ def normalize_address_to_id(address: str | int, addressDictionary, addressIdDict
                             "insert into actors (\"addressId\", address, \"addressEth\") values (%s, %s, %s)",
                             (result, addressStr, None)
                         )
+            
         return result, addressDictionary, addressIdDictionary
 
     if address in addressDictionary:
         result = addressDictionary[address]   
 
     if result == 0:
+        print(f"Native address {result}")
         if isinstance(address, str) and (address.startswith("f1") or address.startswith("f3")):
             lotus_api_call_result = lotus_api_call(method="Filecoin.StateLookupID", params=[address, None])
             if (isinstance(lotus_api_call_result, str) and lotus_api_call_result.startswith("f0")):
@@ -173,7 +185,7 @@ def get_network_version( height: int) -> str:
     return str(network_version)
     
 def find_actor_name(actor_address_id):
-    actorName = ""
+    actorName = "evm"
     if actor_address_id == "f06":
         actorName = "verifiedregistry"
     if actor_address_id == "f05":
@@ -184,8 +196,6 @@ def find_actor_name(actor_address_id):
         actorName = "storagepower"
     if actor_address_id == "f010":
         actorName = "eam"
-    if actor_address_id == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja":
-        actorName = "evm"
     return actorName
 
 def find_subcall(subcalls, matchers=None):
@@ -402,8 +412,20 @@ with DAG(
                             matchers=[["f05", 4], ["f06", 2, 4], ["f04", 8]]
                             postNV22 = False
                         else:
-                            matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ], ["f010", 3]]
-                            # matchers=[["f010", 3]]
+                            # matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ], ["f010", 3]]
+                            matchers=[]
+                            if height > 3996816:
+                                with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
+                                    with conn.cursor() as cur:
+                                        rows = cur.execute("select \"address\", \"addressId\" from meta_allocators")
+                                        for row in rows:
+                                            matchers.append( [row[0], 3844450837] )
+                                            matchers.append( [row[1], 3844450837] )
+                                        rows = cur.execute("select \"address\", \"addressId\" from client_contracts")
+                                        for row in rows:
+                                            matchers.append( [row[0], 3844450837] )
+                                            matchers.append( [row[1], 3844450837] )
+
                             postNV22 = True
                                       
                         subcall = find_subcall(
@@ -472,15 +494,20 @@ with DAG(
         decodedResults = []
         for obj in messagesToDecode:
             try:
-                decodeParametersCmd = [
-                    "/opt/airflow/plugins/goExecutables/decode_params",
-                    find_actor_name(obj['msg']['To']),
-                    str(obj['msg']['Method']),
-                    obj['msg']['Params'],
-                    get_network_version( obj['height'])
-                ]
-                resultDecodeParametersCmd = subprocess.run(decodeParametersCmd, capture_output=True, text=True, check=True)
-                decodedParams = json.loads(resultDecodeParametersCmd.stdout.strip())
+                actorName = find_actor_name(obj['msg']['To'])
+                if actorName != "evm":
+                    decodeParametersCmd = [
+                        "/opt/airflow/plugins/goExecutables/decode_params",
+                        actorName,
+                        str(obj['msg']['Method']),
+                        obj['msg']['Params'],
+                        get_network_version( obj['height'])
+                    ]
+                    resultDecodeParametersCmd = subprocess.run(decodeParametersCmd, capture_output=True, text=True, check=True)
+                    decodedParams = json.loads(resultDecodeParametersCmd.stdout.strip())
+                else:
+                    decodedParams = obj['msg']['Params']
+                
             except subprocess.CalledProcessError as e:
                 print(f"Failed to decode parameters for {obj}")
                 print(f"Command: {' '.join(decodeParametersCmd)}")
@@ -523,199 +550,222 @@ with DAG(
 
     @task
     def output_results(decodedResults: dict) -> None:
-        batches = { "allocations": [], "claims": [], "verifierAllowances": [], "clientAllowances": [], "proposals": [], "sectorActivations": [], "metaAllocators": [], "clientContracts": [] }
-        for obj in decodedResults:
-            # allocation
-            if (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05") or (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954):
-                decodedReceipt = loads(base64.b64decode(obj['verifRegUnivHookRct']['Return']))
-                decodedParams = loads(base64.b64decode(obj['decodedParams']['OperatorData']))
-                clientId = ''
-                # Determine clientId based on method
-                # 3621052141 allocation from the datacap holder
-                # 80475954 allocation not from the datacap holder
-                if obj['msg']['Method'] == 3621052141: clientId = obj['decodedParams']['From']
-                if obj['msg']['Method'] == 80475954: clientId = obj['msg']['From']
+        with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
+            with conn.cursor() as cur:
+                metaAllocatorAddressDictionary = {}
+                clientContractAddressDictionary = {}
 
-                #decodedParams[0] is array of allocations
-                allocations = decodedParams[0]
-                for i in range(len(allocations)):
-                    allocation = allocations[i]
-                    allocationId = decodedReceipt[2][i]  # array of allocation IDs
-                    batches['allocations'].append(
-                        {
-                            'id': allocationId,
-                            'clientId': int(clientId[2:]),  # strip 'f0' prefix
-                            'providerId': allocation[0],
-                            'pieceCid': extract_dag_cid(allocation[1]),
-                            'pieceSize': allocation[2],
-                            'termMin': allocation[3],
-                            'termMax': allocation[4],
-                            'expiration': allocation[5]
-                        }
-                    )
+                rows = cur.execute("select \"address\", \"addressId\", \"addressEth\" from meta_allocators")
+                for row in rows:
+                    metaAllocatorAddressDictionary[row[0]] = (row[2])
+                    metaAllocatorAddressDictionary[row[1]] = (row[2])
 
-            # claim 
-            if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 9:
-                sectors = None
-                if obj['parent'] and 'Method' in obj['parent'] and obj['parent']['Method'] == 34:
-                    sectors = obj['decodedParamsParent']['SectorActivations']
-                if obj['parent'] and 'Method' in obj['parent'] and obj['parent']['Method'] == 35:
-                    sectors = obj['decodedParamsParent']['SectorUpdates']
+                rows = cur.execute("select \"address\", \"addressId\", \"addressEth\" from client_contracts")
+                for row in rows:
+                    clientContractAddressDictionary[row[0]] = (row[2])
+                    clientContractAddressDictionary[row[1]] = (row[2])
 
-                dealIds = {}
-                if sectors:
-                    for sector in sectors:
-                        sectorNumber = None
-                        if obj['parent']['Method'] == 34:
-                            sectorNumber =sector['SectorNumber']
-                        if obj['parent']['Method'] == 35:
-                            sectorNumber = sector['Sector']
+                batches = { "allocations": [], "claims": [], "verifierAllowances": [], "clientAllowances": [], "proposals": [], "sectorActivations": [], "metaAllocators": [], "clientContracts": [] }
+                for obj in decodedResults:
+                    # allocation
+                    if (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05") or (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954):
+                        decodedReceipt = loads(base64.b64decode(obj['verifRegUnivHookRct']['Return']))
+                        decodedParams = loads(base64.b64decode(obj['decodedParams']['OperatorData']))
+                        clientId = ''
+                        # Determine clientId based on method
+                        # 3621052141 allocation from the datacap holder
+                        # 80475954 allocation not from the datacap holder
+                        if obj['msg']['Method'] == 3621052141: clientId = obj['decodedParams']['From']
+                        if obj['msg']['Method'] == 80475954: clientId = obj['msg']['From']
 
-                        if sector['Pieces'] is not None:    
-                            for piece in sector['Pieces']:
-                                if piece['Notify'] is not None:
-                                    for notifyItem in piece['Notify']:
-                                        if notifyItem['Address'] == 'f05':
-                                            dealIds[f"{piece['VerifiedAllocationKey']['Client']}_{piece['VerifiedAllocationKey']['ID']}_{sectorNumber}"] = loads(base64.b64decode(notifyItem['Payload']))
-
-                for sector in obj['decodedParams']['Sectors']:
-                    if sector['Claims'] is not None:
-                        for claim in sector['Claims']:
-                            key = f"{claim['Client']}_{claim['AllocationId']}_{sector['Sector']}"
-                            dealId = dealIds.get(key, None)
-                            batches['claims'].append(
+                        #decodedParams[0] is array of allocations
+                        allocations = decodedParams[0]
+                        for i in range(len(allocations)):
+                            allocation = allocations[i]
+                            allocationId = decodedReceipt[2][i]  # array of allocation IDs
+                            batches['allocations'].append(
                                 {
-                                    'id': claim['AllocationId'],
-                                    'clientId': claim['Client'],
-                                    'pieceCid': claim['Data']['/'],
-                                    'pieceSize': claim['Size'],
-                                    'providerId': int(obj['msg']['From'][2:]),
-                                    'sector': sector['Sector'],
-                                    'dealId': dealId,
-                                    'sectorExpiry': sector['SectorExpiry'],
-                                    'termStart': obj['height'],
+                                    'id': allocationId,
+                                    'clientId': int(clientId[2:]),  # strip 'f0' prefix
+                                    'providerId': allocation[0],
+                                    'pieceCid': extract_dag_cid(allocation[1]),
+                                    'pieceSize': allocation[2],
+                                    'termMin': allocation[3],
+                                    'termMax': allocation[4],
+                                    'expiration': allocation[5]
                                 }
                             )
 
-            # create verifier (f080 multisig)
-            if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
-                batches['verifierAllowances'].append(
-                    {
-                        "verifierId": obj['decodedParams']['Address'],
-                        "allowance": obj['decodedParams']['Allowance'],
-                        "msgCid": obj['baseMsg']['MsgCid'],
-                        "height": obj['height']
-                    }
-                )
+                    # claim 
+                    if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 9:
+                        sectors = None
+                        if obj['parent'] and 'Method' in obj['parent'] and obj['parent']['Method'] == 34:
+                            sectors = obj['decodedParamsParent']['SectorActivations']
+                        if obj['parent'] and 'Method' in obj['parent'] and obj['parent']['Method'] == 35:
+                            sectors = obj['decodedParamsParent']['SectorUpdates']
 
-            # create client meta-allocator
-            if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 3916220144:
-                batches['clientAllowances'].append(
-                    {
-                        "clientId": obj['decodedParams']['Address'], 
-                        "allowance": obj['decodedParams']['Allowance'], 
-                        "verifierId": obj['msg']['From'],
-                        "height": obj['height'],
-                        "msgCid": obj['baseMsg']['MsgCid']
-                    }
-                )
+                        dealIds = {}
+                        if sectors:
+                            for sector in sectors:
+                                sectorNumber = None
+                                if obj['parent']['Method'] == 34:
+                                    sectorNumber =sector['SectorNumber']
+                                if obj['parent']['Method'] == 35:
+                                    sectorNumber = sector['Sector']
 
-            # create client 
-            if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 4:
-                batches['clientAllowances'].append(
-                    {
-                        "clientId": obj['decodedParams']['Address'], 
-                        "allowance": obj['decodedParams']['Allowance'], 
-                        "verifierId": obj['msg']['From'],
-                        "height": obj['height'],
-                        "msgCid": obj['baseMsg']['MsgCid']
-                    }
-                )
-    
-            # proposal 
-            if obj['msg']['To'] == "f05" and obj['msg']['Method'] == 4:
-                decodedReceipt = loads(base64.b64decode(obj['msgRct']['Return']))
-                proposalIndex = 0
-                for deal in obj['decodedParams']['Deals']:
-                    proposal = deal['Proposal']
-                    if proposal['VerifiedDeal'] is True:
-                        batches['proposals'].append(
+                                if sector['Pieces'] is not None:    
+                                    for piece in sector['Pieces']:
+                                        if piece['Notify'] is not None:
+                                            for notifyItem in piece['Notify']:
+                                                if notifyItem['Address'] == 'f05':
+                                                    dealIds[f"{piece['VerifiedAllocationKey']['Client']}_{piece['VerifiedAllocationKey']['ID']}_{sectorNumber}"] = loads(base64.b64decode(notifyItem['Payload']))
+
+                        for sector in obj['decodedParams']['Sectors']:
+                            if sector['Claims'] is not None:
+                                for claim in sector['Claims']:
+                                    key = f"{claim['Client']}_{claim['AllocationId']}_{sector['Sector']}"
+                                    dealId = dealIds.get(key, None)
+                                    batches['claims'].append(
+                                        {
+                                            'id': claim['AllocationId'],
+                                            'clientId': claim['Client'],
+                                            'pieceCid': claim['Data']['/'],
+                                            'pieceSize': claim['Size'],
+                                            'providerId': int(obj['msg']['From'][2:]),
+                                            'sector': sector['Sector'],
+                                            'dealId': dealId,
+                                            'sectorExpiry': sector['SectorExpiry'],
+                                            'termStart': obj['height'],
+                                        }
+                                    )
+
+                    # create verifier (f080 multisig)
+                    if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 2:
+                        batches['verifierAllowances'].append(
                             {
-                                'dealId': decodedReceipt[0][proposalIndex],
-                                'clientId': proposal['Client'],
-                                'pieceCid': proposal['PieceCID']['/'],
-                                'pieceSize': proposal['PieceSize'],
-                                'providerId': proposal['Provider'],
-                                'label': proposal['Label'],
-                                'verified': proposal['VerifiedDeal'],
-                                'storagePricePerEpoch': proposal['StoragePricePerEpoch'],
-                                'clientCollateral': proposal['ClientCollateral'],
-                                'providerCollateral': proposal['ProviderCollateral'],
-                                'startEpoch': proposal['StartEpoch'],
-                                'endEpoch': proposal['EndEpoch'],
+                                "verifierId": obj['decodedParams']['Address'],
+                                "allowance": obj['decodedParams']['Allowance'],
+                                "msgCid": obj['baseMsg']['MsgCid'],
+                                "height": obj['height']
                             }
                         )
-                    proposalIndex += 1
 
-            # sector activations 
-            if obj['msg']['To'] == "f04" and obj['msg']['Method'] == 8:
-                if obj['decodedParams']['DealIDs'] is not None:
-                    for dealId in obj['decodedParams']['DealIDs']:
-                        batches['sectorActivations'].append(
+                    # create client meta-allocator
+                    if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 3916220144:
+                        batches['clientAllowances'].append(
                             {
-                                'dealId': dealId,
-                                'providerId': int(obj['decodedParams']['Miner']),
-                                'activationHeight': obj['height'],
-                                'sectorNumber': int(obj['decodedParams']['Number'])
+                                "clientId": obj['decodedParams']['Address'], 
+                                "allowance": obj['decodedParams']['Allowance'], 
+                                "verifierId": obj['msg']['From'],
+                                "height": obj['height'],
+                                "msgCid": obj['baseMsg']['MsgCid']
                             }
-                        )  
+                        )
 
-            # sector activations 
-            if obj['msg']['To'] == "f010" and obj['msg']['Method'] == 3 and obj['msgRct']['ExitCode'] == 0 and (obj['msg']['From'] == "f03239905" or obj['msg']['From'] == "f03136590"):
-                decodedReceipt = loads(base64.b64decode(obj['msgRct']['Return']))
-
-                addressId = decodedReceipt[0]
-                address = Address(decodedReceipt[1], CoinType.MAIN)
-                addressEth = decodedReceipt[2]
-
-                if (obj['msg']['From'] == "f03239905"):
-                    batches['clientContracts'].append(
+                    # create client 
+                    if obj['msg']['To'] == "f06" and obj['msg']['Method'] == 4:
+                        batches['clientAllowances'].append(
                             {
-                                'addressId': addressId,
-                                'address': encode('f', address),
-                                'addressEth': "0x" + addressEth.hex()
+                                "clientId": obj['decodedParams']['Address'], 
+                                "allowance": obj['decodedParams']['Allowance'], 
+                                "verifierId": obj['msg']['From'],
+                                "height": obj['height'],
+                                "msgCid": obj['baseMsg']['MsgCid']
                             }
-                        )  
-
-                if (obj['msg']['From'] == "f03136590"):
-                     batches['metaAllocators'].append(
-                            {
-                                'addressId': addressId,
-                                'address': encode('f', address),
-                                'addressEth': "0x" + addressEth.hex()
-                            }
-                        )  
-
-            # meta-allocator instance
-            # if obj['msg']['To'] == "f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja" and obj['msg']['Method'] == 3844450837:
-            #     print(f"meta-allocator matched for message")
-            #     hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
-            #     with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
-            #         abi = json.load(f)
+                        )
             
-            #     w3 = Web3()
-            #     contract = w3.eth.contract(address=Web3.to_checksum_address('0x984376abd1ff5518b6ae9d065c40696ae916dc88'), abi=abi)
-            #     decodedContractFunction = contract.decode_function_input(hexEthTxInput)
-            #     functionName = decodedContractFunction[0].fn_name
-            #     functionParams = decodedContractFunction[1]
+                    # proposal 
+                    if obj['msg']['To'] == "f05" and obj['msg']['Method'] == 4:
+                        decodedReceipt = loads(base64.b64decode(obj['msgRct']['Return']))
+                        proposalIndex = 0
+                        for deal in obj['decodedParams']['Deals']:
+                            proposal = deal['Proposal']
+                            if proposal['VerifiedDeal'] is True:
+                                batches['proposals'].append(
+                                    {
+                                        'dealId': decodedReceipt[0][proposalIndex],
+                                        'clientId': proposal['Client'],
+                                        'pieceCid': proposal['PieceCID']['/'],
+                                        'pieceSize': proposal['PieceSize'],
+                                        'providerId': proposal['Provider'],
+                                        'label': proposal['Label'],
+                                        'verified': proposal['VerifiedDeal'],
+                                        'storagePricePerEpoch': proposal['StoragePricePerEpoch'],
+                                        'clientCollateral': proposal['ClientCollateral'],
+                                        'providerCollateral': proposal['ProviderCollateral'],
+                                        'startEpoch': proposal['StartEpoch'],
+                                        'endEpoch': proposal['EndEpoch'],
+                                    }
+                                )
+                            proposalIndex += 1
 
-            #     if functionName == "addVerifiedClient":
-            #         address = Address(functionParams.get('clientAddress'), CoinType.MAIN)
-            #         print(encode('f', address))
-            #         print(functionParams.get('amount'))
+                    # sector activations 
+                    if obj['msg']['To'] == "f04" and obj['msg']['Method'] == 8:
+                        if obj['decodedParams']['DealIDs'] is not None:
+                            for dealId in obj['decodedParams']['DealIDs']:
+                                batches['sectorActivations'].append(
+                                    {
+                                        'dealId': dealId,
+                                        'providerId': int(obj['decodedParams']['Miner']),
+                                        'activationHeight': obj['height'],
+                                        'sectorNumber': int(obj['decodedParams']['Number'])
+                                    }
+                                )  
 
-        with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
-            with conn.cursor() as cur:
+                    # sector activations 
+                    if obj['msg']['To'] == "f010" and obj['msg']['Method'] == 3 and obj['msgRct']['ExitCode'] == 0 and (obj['msg']['From'] == "f03239905" or obj['msg']['From'] == "f03136590"):
+                        decodedReceipt = loads(base64.b64decode(obj['msgRct']['Return']))
+
+                        addressId = decodedReceipt[0]
+                        address = Address(decodedReceipt[1], CoinType.MAIN)
+                        addressEth = decodedReceipt[2]
+
+                        if (obj['msg']['From'] == "f03239905"):
+                            batches['clientContracts'].append(
+                                    {
+                                        'addressId': addressId,
+                                        'address': encode('f', address),
+                                        'addressEth': "0x" + addressEth.hex()
+                                    }
+                                )  
+
+                        if (obj['msg']['From'] == "f03136590"):
+                            batches['metaAllocators'].append(
+                                    {
+                                        'addressId': addressId,
+                                        'address': encode('f', address),
+                                        'addressEth': "0x" + addressEth.hex()
+                                    }
+                                )  
+
+                    # meta-allocator instance
+                    if obj['msg']['To'] in metaAllocatorAddressDictionary and obj['msg']['Method'] == 3844450837:
+                        print(f"meta-allocator matched for message")
+                        hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
+                        with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
+                            abi = json.load(f)
+                    
+                        w3 = Web3()
+                        contract = w3.eth.contract(address=Web3.to_checksum_address(metaAllocatorAddressDictionary[obj['msg']['To']]), abi=abi)
+                        decodedContractFunction = contract.decode_function_input(hexEthTxInput)
+                        functionName = decodedContractFunction[0].fn_name
+                        functionParams = decodedContractFunction[1]
+
+                        print(f"meta-allocator function: {functionName}, params: {functionParams}")
+                        if functionName == "addAllowance":
+                            address = str(functionParams.get('allocator'))
+                            filNativeAddress = eth_address_to_fil_native(address)
+ 
+                            batches['verifierAllowances'].append(
+                            {
+                                "verifierId": filNativeAddress,
+                                "allowance": functionParams.get('amount'),
+                                "msgCid": obj['baseMsg']['MsgCid'],
+                                "height": obj['height']
+                            }
+                        )
+
+        
                 # normalize addresses, replace everything with IDs (strip 'f0' prefix and convert to int)
                 addressesToSearchInDb = []
                 addressIdsToSearchInDb = []
@@ -747,6 +797,7 @@ with DAG(
                 for row in rows:
                     address_mapping[row[0]] = row[1]  # address -> id
 
+                print(f"Normalizing {len(addressIdsToSearchInDb)} address IDs...")
                 cur.execute(
                         "SELECT \"address\", \"addressId\" FROM public.actors WHERE \"addressId\" = ANY(%s);",
                         (addressIdsToSearchInDb,)
@@ -1010,8 +1061,7 @@ with DAG(
                         ]
                     )
 
-
-                    
+       
     keys = list_keys()
     results = process_trace.expand(obj=keys) 
     decoded_results = decode_parameters.expand(messagesToDecode=results)
