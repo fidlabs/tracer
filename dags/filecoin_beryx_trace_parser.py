@@ -26,13 +26,13 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "5182191"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "4785107"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 
 SHELL = "bash"
 def eth_address_to_fil_native(address: str) -> str:
-    has_prefix = address.startswith('0xff0000000000000000000000')              
+    has_prefix = address.lower().startswith('0xff0000000000000000000000')              
     if has_prefix:
         filNativeAddress = "f0" + str(int.from_bytes(bytes.fromhex(address[26:]), byteorder="big", signed=False))
     else:
@@ -495,7 +495,7 @@ with DAG(
         for obj in messagesToDecode:
             try:
                 actorName = find_actor_name(obj['msg']['To'])
-                if actorName != "evm":
+                if obj['msg']['ParamsCodec'] == 81:
                     decodeParametersCmd = [
                         "/opt/airflow/plugins/goExecutables/decode_params",
                         actorName,
@@ -505,8 +505,11 @@ with DAG(
                     ]
                     resultDecodeParametersCmd = subprocess.run(decodeParametersCmd, capture_output=True, text=True, check=True)
                     decodedParams = json.loads(resultDecodeParametersCmd.stdout.strip())
-                else:
-                    decodedParams = obj['msg']['Params']
+                else: 
+                    if obj['msg']['ParamsCodec'] == 85:
+                        decodedParams = obj['msg']['Params']
+                    else:
+                        decodedParams = None
                 
             except subprocess.CalledProcessError as e:
                 print(f"Failed to decode parameters for {obj}")
@@ -764,6 +767,35 @@ with DAG(
                                 "height": obj['height']
                             }
                         )
+                            
+                    # client contract instance
+                    if obj['msg']['To'] in clientContractAddressDictionary and obj['msg']['Method'] == 3844450837:
+                        print(f"client contract matched for message")
+                        hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
+                       
+                        with open('/opt/airflow/plugins/abis/client-contract.json', 'r') as f:
+                            abi = json.load(f)
+                    
+                        w3 = Web3()
+                        contract = w3.eth.contract(address=Web3.to_checksum_address(clientContractAddressDictionary[obj['msg']['To']]), abi=abi)
+                        decodedContractFunction = contract.decode_function_input(hexEthTxInput)
+                        functionName = decodedContractFunction[0].fn_name
+                        functionParams = decodedContractFunction[1]
+
+                        print(f"client contract function: {functionName}, params: {functionParams}")
+                        if functionName == "increaseAllowance":
+                            address = str(functionParams.get('client'))
+                            filNativeAddress = eth_address_to_fil_native(address)
+  
+                            batches['clientAllowances'].append(
+                                {
+                                    "clientId": filNativeAddress,
+                                    "allowance": functionParams.get('amount'),
+                                    "verifierId": obj['msg']['To'],
+                                    "msgCid": obj['baseMsg']['MsgCid'],
+                                    "height": obj['height']
+                                }
+                            )
 
         
                 # normalize addresses, replace everything with IDs (strip 'f0' prefix and convert to int)
