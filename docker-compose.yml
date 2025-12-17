@@ -39,6 +39,7 @@ services:
     environment:
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: "default"
+      TRACES_ROOT: /data/traces
     ports:
       - "8123:8123"   # HTTP
     ulimits:
@@ -47,6 +48,7 @@ services:
         hard: 262144
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      - /mnt/ironwolf4/traces:/data/traces:ro
     healthcheck:
       test: ["CMD", "bash", "-c", "wget -qO- http://localhost:8123/ping | grep -q 'Ok'"]
       interval: 10s
@@ -68,11 +70,13 @@ services:
     build: .
     environment:
       <<: *airflow-env
+      TRACES_ROOT: /data/traces
     command: bash -lc "airflow scheduler"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
+      - /mnt/ironwolf4/traces:/data/traces:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,6 +89,7 @@ services:
     build: .
     environment:
       <<: *airflow-env
+      TRACES_ROOT: /data/traces
     command: bash -lc "airflow webserver"
     ports:
       - "8080:8080"
@@ -92,6 +97,7 @@ services:
       - ./dags:/opt/airflow/dags
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
+      - /mnt/ironwolf4/traces:/data/traces:ro
     depends_on:
       postgres:
         condition: service_healthy
