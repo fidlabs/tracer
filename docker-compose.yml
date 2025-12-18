@@ -3,8 +3,14 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__LOAD_EXAMPLES: "False"
   AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
   AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+  # Shared secret key so webserver/scheduler/triggerer can authenticate log and API calls
+  # Any sufficiently random string is fine for local/dev.
+  AIRFLOW__WEBSERVER__SECRET_KEY: "super-secret-local-key-change-me"
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
   AIRFLOW__LOGGING__LOG_FILENAME_TEMPLATE: "{{ ti.dag_id }}/{{ ti.run_id }}/{{ ti.task_id }}/{{ ti.map_index }}/{{ ti.try_number }}.log"
+  # Use local filesystem for logs (both scheduler and webserver have logs volume mounted)
+  AIRFLOW__LOGGING__REMOTE_LOGGING: "False"
+  AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: ""
   
   # R2 (S3-compatible) configuration for DAG
   R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
