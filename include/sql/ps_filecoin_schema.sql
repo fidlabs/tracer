@@ -65,7 +65,8 @@ create table public.allocations
     "pieceSize"    numeric,
     "termMax"      integer,
     "termMin"      integer,
-    expiration     integer
+    expiration     integer,
+    "contractImmediateCaller" integer
 );
 
 create table public.deal_proposals

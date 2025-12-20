@@ -26,7 +26,7 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "4785107"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "4784822"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 
@@ -55,6 +55,9 @@ def address_to_id(address: str | int) -> int:
 
 def normalize_address_to_id(address: str | int, addressDictionary, addressIdDictionary) -> int:
     result = 0
+    if address == 5 or address == "f05":
+        return 5, addressDictionary, addressIdDictionary
+    
     if isinstance(address, int):
         result = address
     if isinstance(address, str) and address.startswith("f0"):
@@ -62,7 +65,6 @@ def normalize_address_to_id(address: str | int, addressDictionary, addressIdDict
 
     if result != 0:
         if result in addressIdDictionary:
-            print(f"Found in addressIdDictionary {result}")
             addressStr = addressIdDictionary[result]
             if (addressIdDictionary[result] == "" or addressIdDictionary[result] is None):
                 addressStr = lotus_api_call(method="Filecoin.StateAccountKey", params=[f"f0{result}", None])
@@ -198,81 +200,61 @@ def find_actor_name(actor_address_id):
         actorName = "eam"
     return actorName
 
-def find_subcall(subcalls, matchers=None):
-    """
-    Find the first subcall element that matches any destination/method combination.
-
-    Args:
-        subcalls (list): List of subcall objects
-        matchers (list): List of arrays, where each array has [destination, method1, method2, ...]
-                        First element is the destination address, rest are valid methods
-        
-    Returns:
-        dict or None: First subcall object that matches the condition, or None if no match
-    """
-    if subcalls is None or matchers is None:
+def find_subcall (subcalls, destination, method):
+    if subcalls is None or destination is None or method is None:
         return None    
     for subcall in subcalls:
         msg_to = subcall['Msg']['To']
         msg_method = subcall['Msg']['Method']
         
-        # Check if this subcall matches any of the matchers
-        for matcher in matchers:
-            if len(matcher) < 2:
-                continue
-            
-            destination = matcher[0]
-            methods = matcher[1:]  # Rest of the array are the methods
-            
-            # Check if destination matches and method is in the list of methods
-            if msg_to == destination and msg_method in methods:
-                return subcall
+        # Check if destination matches and method is in the list of methods
+        if msg_to == destination and msg_method == method:
+            return subcall
         
         # Recursively check nested subcalls if they exist
         if subcall.get('Subcalls'):
-            result = find_subcall(subcall['Subcalls'], matchers)
+            result = find_subcall(subcall['Subcalls'], destination, method)
             if result is not None:
                 return result
     
     return None
 
-def find_subcall_and_parent(subcalls, parent=None, matchers=None):
-    """
-    Find the first subcall element that matches any destination/method combination.
-
-    Args:
-        subcalls (list): List of subcall objects
-        matchers (list): List of arrays, where each array has [destination, method1, method2, ...]
-                        First element is the destination address, rest are valid methods
-        
-    Returns:
-        dict or None: First subcall object that matches the condition, or None if no match
-    """
-    if subcalls is None or matchers is None:
-        return None, None
-        
+def find_subcall_and_parent(subcalls, destination, method,  parent=None):
+    if subcalls is None or destination is None or method is None:
+        return None    
     for subcall in subcalls:
         msg_to = subcall['Msg']['To']
         msg_method = subcall['Msg']['Method']
         
-        # Check if this subcall matches any of the matchers
-        for matcher in matchers:
-            if len(matcher) < 2:
-                continue
-            
-            destination = matcher[0]
-            methods = matcher[1:]  # Rest of the array are the methods
-            
-            # Check if destination matches and method is in the list of methods
-            if msg_to == destination and msg_method in methods:
-                return subcall, parent
+        # Check if destination matches and method is in the list of methods
+        if msg_to == destination and msg_method == method:
+            return subcall, parent
         
         # Recursively check nested subcalls if they exist
         if subcall.get('Subcalls'):
-            result = find_subcall_and_parent(subcall['Subcalls'], subcall, matchers)
-            if result != (None, None):
+            result = find_subcall_and_parent(subcall['Subcalls'], destination, method, subcall)
+            if result is not None:
                 return result
-    
+   
+    return None, None
+
+def find_subcall_and_path(subcalls, destination, method, path=[]):
+    if subcalls is None or destination is None or method is None:
+        return None    
+    for subcall in subcalls:
+        msg_to = subcall['Msg']['To']
+        msg_method = subcall['Msg']['Method']
+        
+        # Check if destination matches and method is in the list of methods
+        if msg_to == destination and msg_method == method:
+            return subcall, path
+        
+        # Recursively check nested subcalls if they exist
+        if subcall.get('Subcalls'):
+            result = find_subcall_and_path(subcall['Subcalls'], destination, method, path + [{ "to": subcall['Msg']['To'], "from": subcall['Msg']['From'] }])
+            if result is not None:
+                return result
+   
     return None, None
 
 def strip_until_sentinel(data: bytes) -> bytes:
@@ -405,15 +387,15 @@ with DAG(
                     try:
                         trace_obj = json.loads(line)
                         # matchers format: [[destination, method1, method2, ...], ...]
-                        parent = None
-                        # matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ]]
-                        # matchers=[["f410ftbbxnk6r75krrnvotudfyqdjnlurnxei735ruja",3844450837]]
+                        
                         if height <=3855360:
                             matchers=[["f05", 4], ["f06", 2, 4], ["f04", 8]]
+                            matchersWithParents = []
+                            matchersWithPaths = []
                             postNV22 = False
                         else:
-                            # matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141, 80475954 ], ["f010", 3]]
-                            matchers=[]
+                            matchers=[["f06", 2, 4, 3916220144], ["f07", 3621052141 ], ["f010", 3]]
+                            # matchers=[]
                             if height > 3996816:
                                 with psycopg.connect("host=postgres port=5432 dbname=filecoin connect_timeout=10 user=airflow password=airflow") as conn:
                                     with conn.cursor() as cur:
@@ -426,48 +408,78 @@ with DAG(
                                             matchers.append( [row[0], 3844450837] )
                                             matchers.append( [row[1], 3844450837] )
 
+                            matchersWithParents = [["f06", 9]]
+                            matchersWithPaths = [["f07", 80475954]]
                             postNV22 = True
-                                      
-                        subcall = find_subcall(
-                            subcalls=[trace_obj['ExecutionTrace']], 
-                            matchers=matchers
-                        )
 
-                        if subcall is None and postNV22 is True :
-                            subcall, parent = find_subcall_and_parent(
-                                subcalls=[trace_obj['ExecutionTrace']],
-                                parent= trace_obj['ExecutionTrace']['Msg'],
-                                matchers=[["f06", 9]]
-                            )
+                        subcalls = [];
 
-                        if subcall:
-                            msg = subcall['Msg']
-                            msgRct = subcall['MsgRct']
-                            verifRegUnivHookRct = []
-                            if (msg['To'] == "f07" and msg['Method'] == 3621052141 and msg['From'] == "f05") or (msg['To'] == "f07" and msg['Method'] == 80475954):
-                                verifregSubcall = find_subcall(subcalls=subcall['Subcalls'], matchers=[["f06", 3726118371]])
-                                if verifregSubcall:
-                                    if verifregSubcall['Msg']['From']=='f07':
-                                        verifRegUnivHookRct= verifregSubcall['MsgRct']
+                        for matcher in matchers:
+                            if len(matcher) < 2:
+                                continue
+                            
+                            destination = matcher[0]
+                            methods = matcher[1:]  # Rest of the array are the methods
+                            
+                            for method in methods:
+                                subcall = find_subcall(subcalls=[trace_obj['ExecutionTrace']], destination=destination, method=method)
+                                if (subcall is not None):
+                                    subcalls.append({"subcall": subcall, "parent": None, "path": []})
 
-                            print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
-                            matches.append({
-                                "msg": msg, 
-                                "msgRct": msgRct,
-                                "verifRegUnivHookRct": verifRegUnivHookRct, 
-                                "parent": parent, 
-                                "baseMsg": {
-                                    "To": trace_obj['Msg']['To'],
-                                    "From": trace_obj['Msg']['From'],
-                                    "Version": trace_obj['Msg']['Version'],
-                                    "Method": trace_obj['Msg']['Method'],
-                                    "Nonce": trace_obj['Msg']['Nonce'],
-                                    "MsgCid": trace_obj['MsgCid']["/"]
-                                    }, 
-                                "height": height
-                            })
-                        else:
-                            print(f"No matched subcall in trace {i+1}")
+                        for matcher in matchersWithParents:
+                            if len(matcher) < 2:
+                                continue
+                            
+                            destination = matcher[0]
+                            methods = matcher[1:]  # Rest of the array are the methods
+                            
+                            for method in methods:
+                                subcall, parent = find_subcall_and_parent(subcalls=[trace_obj['ExecutionTrace']], destination=destination, method=method, parent=None)
+                                if (subcall is not None):
+                                    subcalls.append({"subcall": subcall, "parent": parent, "path": []})
+
+                        for matcher in matchersWithPaths:
+                            if len(matcher) < 2:
+                                continue
+                            
+                            destination = matcher[0]
+                            methods = matcher[1:]  # Rest of the array are the methods
+                            
+                            for method in methods:
+                                subcall, path = find_subcall_and_path(subcalls=[trace_obj['ExecutionTrace']], destination=destination, method=method, path=[]) 
+                                if (subcall is not None):
+                                    subcalls.append({"subcall": subcall, "parent": None, "path": path})
+
+                        for match in subcalls:
+                            if "subcall" in match:
+                                msg = match["subcall"]['Msg']
+                                msgRct = match["subcall"]['MsgRct']
+                                verifRegUnivHookRct = []
+                                if (msg['To'] == "f07" and msg['Method'] == 3621052141 and msg['From'] == "f05") or (msg['To'] == "f07" and msg['Method'] == 80475954):
+                                    verifregSubcall = find_subcall(subcalls=match["subcall"]['Subcalls'], destination="f06", method=3726118371)
+                                    if verifregSubcall:
+                                        if verifregSubcall['Msg']['From']=='f07':
+                                            verifRegUnivHookRct= verifregSubcall['MsgRct']
+
+                                print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
+                                matches.append({
+                                    "msg": msg, 
+                                    "msgRct": msgRct,
+                                    "verifRegUnivHookRct": verifRegUnivHookRct, 
+                                    "parent": match["parent"], 
+                                    "path": match["path"],
+                                    "baseMsg": {
+                                        "To": trace_obj['Msg']['To'],
+                                        "From": trace_obj['Msg']['From'],
+                                        "Version": trace_obj['Msg']['Version'],
+                                        "Method": trace_obj['Msg']['Method'],
+                                        "Nonce": trace_obj['Msg']['Nonce'],
+                                        "MsgCid": trace_obj['MsgCid']["/"]
+                                        }, 
+                                    "height": height
+                                })
+                            else:
+                                print(f"No matched subcall in trace {i+1}")
 
                     except json.JSONDecodeError as e:
                         print(f"Failed to parse JSON on line {i+1}: {e}")
@@ -544,11 +556,11 @@ with DAG(
                 "baseMsg": obj["baseMsg"], 
                 "verifRegUnivHookRct": obj["verifRegUnivHookRct"], 
                 "parent": obj["parent"], 
+                "path": obj["path"],
                 "decodedParams": decodedParams, 
                 "decodedParamsParent": decodedParamsParent, 
                 "height": obj["height"]
             })
-        print(decodedResults)
         return decodedResults
 
     @task
@@ -581,6 +593,13 @@ with DAG(
                         if obj['msg']['Method'] == 3621052141: clientId = obj['decodedParams']['From']
                         if obj['msg']['Method'] == 80475954: clientId = obj['msg']['From']
 
+                        contractImmediateCaller = None
+                        if (len(obj['path']) > 1):
+                            contractImmediateCaller = obj['path'][-2]['from']
+                        else :
+                            contractImmediateCaller = obj['msg']['From']
+
+                        print(f"path: {obj['path']}")
                         #decodedParams[0] is array of allocations
                         allocations = decodedParams[0]
                         for i in range(len(allocations)):
@@ -595,7 +614,8 @@ with DAG(
                                     'pieceSize': allocation[2],
                                     'termMin': allocation[3],
                                     'termMax': allocation[4],
-                                    'expiration': allocation[5]
+                                    'expiration': allocation[5],
+                                    'contractImmediateCaller': contractImmediateCaller,
                                 }
                             )
 
@@ -803,7 +823,7 @@ with DAG(
                 addressIdsToSearchInDb = []
                 # go through each object in batches and collect all addresses
 
-                fieldsToNormalize = ['clientId', 'verifierId'] 
+                fieldsToNormalize = ['clientId', 'verifierId', 'contractImmediateCaller'] 
                 for key in batches:
                     if batches[key]:
                         for item in batches[key]:
@@ -860,7 +880,7 @@ with DAG(
                 # insert allocations
                 if batches['allocations']:
                     cur.executemany(
-                        "INSERT INTO public.allocations (\"allocationId\", \"clientId\", \"providerId\", \"pieceCid\", \"pieceSize\", \"termMin\", \"termMax\", \"expiration\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (\"allocationId\") DO NOTHING;",
+                        "INSERT INTO public.allocations (\"allocationId\", \"clientId\", \"providerId\", \"pieceCid\", \"pieceSize\", \"termMin\", \"termMax\", \"expiration\", \"contractImmediateCaller\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (\"allocationId\") DO NOTHING;",
                         [
                             (
                                 alloc['id'],
@@ -871,6 +891,7 @@ with DAG(
                                 alloc['termMin'],
                                 alloc['termMax'],
                                 alloc['expiration'],
+                                alloc['contractImmediateCaller']
                             )
                             for alloc in batches['allocations']
                         ]
