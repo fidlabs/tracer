@@ -25,8 +25,8 @@ CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "4784822"))    # Starting file number (1-based)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))  # Number of files to process per run
+START_FROM = int(os.getenv("START_FROM", "4828609"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 
@@ -599,7 +599,6 @@ with DAG(
                         else :
                             contractImmediateCaller = obj['msg']['From']
 
-                        print(f"path: {obj['path']}")
                         #decodedParams[0] is array of allocations
                         allocations = decodedParams[0]
                         for i in range(len(allocations)):
@@ -669,7 +668,8 @@ with DAG(
                                 "verifierId": obj['decodedParams']['Address'],
                                 "allowance": obj['decodedParams']['Allowance'],
                                 "msgCid": obj['baseMsg']['MsgCid'],
-                                "height": obj['height']
+                                "height": obj['height'],
+                                "type": "direct"
                             }
                         )
 
@@ -681,7 +681,8 @@ with DAG(
                                 "allowance": obj['decodedParams']['Allowance'], 
                                 "verifierId": obj['msg']['From'],
                                 "height": obj['height'],
-                                "msgCid": obj['baseMsg']['MsgCid']
+                                "msgCid": obj['baseMsg']['MsgCid'],
+                                "type": "meta-allocator"
                             }
                         )
 
@@ -693,7 +694,8 @@ with DAG(
                                 "allowance": obj['decodedParams']['Allowance'], 
                                 "verifierId": obj['msg']['From'],
                                 "height": obj['height'],
-                                "msgCid": obj['baseMsg']['MsgCid']
+                                "msgCid": obj['baseMsg']['MsgCid'],
+                                "type": "direct"
                             }
                         )
             
@@ -747,7 +749,8 @@ with DAG(
                             batches['clientContracts'].append(
                                     {
                                         'addressId': addressId,
-                                        'address': encode('f', address),
+                                        'address': delegated_from_eth_address("0x" + addressEth.hex()),
+                                        'robustAddress': encode('f', address),
                                         'addressEth': "0x" + addressEth.hex()
                                     }
                                 )  
@@ -756,7 +759,8 @@ with DAG(
                             batches['metaAllocators'].append(
                                     {
                                         'addressId': addressId,
-                                        'address': encode('f', address),
+                                        'address': delegated_from_eth_address("0x" + addressEth.hex()),
+                                        'robustAddress': encode('f', address),
                                         'addressEth': "0x" + addressEth.hex()
                                     }
                                 )  
@@ -784,7 +788,8 @@ with DAG(
                                 "verifierId": filNativeAddress,
                                 "allowance": functionParams.get('amount'),
                                 "msgCid": obj['baseMsg']['MsgCid'],
-                                "height": obj['height']
+                                "height": obj['height'],
+                                "type": "meta-allocator"
                             }
                         )
                             
@@ -813,7 +818,8 @@ with DAG(
                                     "allowance": functionParams.get('amount'),
                                     "verifierId": obj['msg']['To'],
                                     "msgCid": obj['baseMsg']['MsgCid'],
-                                    "height": obj['height']
+                                    "height": obj['height'],
+                                    "type": "contract"
                                 }
                             )
 
@@ -956,13 +962,14 @@ with DAG(
                 # insert verifier allowances
                 if batches['verifierAllowances']:
                     cur.executemany(
-                        "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"msgCid\", \"height\") VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"msgCid\", \"height\", \"type\") VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
                                 va['verifierId'],
                                 va['allowance'],
                                 va['msgCid'],
-                                va['height']
+                                va['height'],
+                                va['type']
                             )
                             for va in batches['verifierAllowances']
                         ]
@@ -971,14 +978,15 @@ with DAG(
                 # insert client allowances
                 if batches['clientAllowances']:
                     cur.executemany(
-                        "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"msgCid\", \"height\") VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"msgCid\", \"height\", \"type\") VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
                                 ca['verifierId'],
                                 ca['clientId'],
                                 ca['allowance'],
                                 ca['msgCid'],
-                                ca['height']
+                                ca['height'],
+                                ca['type']
                             )
                             for ca in batches['clientAllowances']
                         ]
@@ -1089,12 +1097,13 @@ with DAG(
                 # insert metaAllocators
                 if batches['metaAllocators']:
                     cur.executemany(
-                        "INSERT INTO public.meta_allocators (\"addressId\", \"address\", \"addressEth\") VALUES (%s,%s,%s) ON CONFLICT (\"addressId\") DO NOTHING;",
+                        "INSERT INTO public.meta_allocators (\"addressId\", \"address\", \"addressEth\", \"robustAddress\") VALUES (%s,%s,%s,%s) ON CONFLICT (\"addressId\") DO NOTHING;",
                         [
                             (
                                 prop['addressId'],
                                 prop['address'],
                                 prop['addressEth'],
+                                prop['robustAddress']
                             )
                             for prop in batches['metaAllocators']
                         ]
@@ -1103,12 +1112,13 @@ with DAG(
                 # insert clientContracts
                 if batches['clientContracts']:
                     cur.executemany(
-                        "INSERT INTO public.client_contracts (\"addressId\", \"address\", \"addressEth\") VALUES (%s,%s,%s) ON CONFLICT (\"addressId\") DO NOTHING;",
+                        "INSERT INTO public.client_contracts (\"addressId\", \"address\", \"addressEth\", \"robustAddress\") VALUES (%s,%s,%s,%s) ON CONFLICT (\"addressId\") DO NOTHING;",
                         [
                             (
                                 prop['addressId'],
                                 prop['address'],
                                 prop['addressEth'],
+                                prop['robustAddress']
                             )
                             for prop in batches['clientContracts']
                         ]
