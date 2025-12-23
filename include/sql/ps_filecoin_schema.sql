@@ -1,3 +1,6 @@
+create database filecoin;
+use filecoin;
+
 create table deals
 (
     id             serial
