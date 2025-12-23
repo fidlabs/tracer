@@ -358,7 +358,7 @@ with DAG(
         return keys
 
     @task
-    def process_trace(obj: dict) -> list[dict]:
+    def fetch_traces(obj: dict) -> list[dict]:
         """
         Claim → stream/decode → insert → mark success/fail.
         Never reprocess (key,etag) if already success.
@@ -377,7 +377,26 @@ with DAG(
         # Execute the pipeline and parse the JSON output to extract keys
         try:
             result = subprocess.run(src, shell=True, capture_output=True, text=True, check=True)
-            lines = result.stdout.strip().split('\n')
+
+            return {"traces": result.stdout.strip(), "height": height}
+        except subprocess.CalledProcessError as e:
+            print(f"Pipeline failed: {e}")
+            print(f"stdout: {e.stdout}")
+            print(f"stderr: {e.stderr}")
+            raise
+
+    @task
+    def process_trace(obj: dict) -> list[dict]:
+        """
+        Claim → stream/decode → insert → mark success/fail.
+        """
+        print(obj)
+        traces = obj["traces"]
+        height = obj["height"]
+
+        # Execute the pipeline and parse the JSON output to extract keys
+        try:
+            lines = traces.split('\n')
             
             matches = []
             print(f"Processing {len(lines)} trace objects...")
@@ -1126,7 +1145,8 @@ with DAG(
 
        
     keys = list_keys()
-    results = process_trace.expand(obj=keys) 
+    traces = fetch_traces.expand(obj=keys)
+    results = process_trace.expand(obj=traces) 
     decoded_results = decode_parameters.expand(messagesToDecode=results)
     output = output_results.expand(decodedResults=decoded_results)
     keys >> results >> decoded_results >> output
