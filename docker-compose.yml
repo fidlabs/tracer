@@ -3,8 +3,17 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__LOAD_EXAMPLES: "False"
   AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
   AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+  # Shared secret key so webserver/scheduler/triggerer can authenticate log and API calls
+  # Any sufficiently random string is fine for local/dev.
+  AIRFLOW__WEBSERVER__SECRET_KEY: "super-secret-local-key-change-me"
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
   AIRFLOW__LOGGING__LOG_FILENAME_TEMPLATE: "{{ ti.dag_id }}/{{ ti.run_id }}/{{ ti.task_id }}/{{ ti.map_index }}/{{ ti.try_number }}.log"
+  # Use local filesystem for logs (both scheduler and webserver have logs volume mounted)
+  AIRFLOW__LOGGING__REMOTE_LOGGING: "False"
+  AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: ""
+  # Don't store task logs in database - only use filesystem
+  AIRFLOW__CORE__STORE_SERIALIZED_DAGS: "True"
+  AIRFLOW__CORE__STORE_DAG_CODE: "True"
   
   # R2 (S3-compatible) configuration for DAG
   R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
@@ -27,7 +36,7 @@ services:
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - /mnt/ironwolf4/traces/statevolumes/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U airflow"]
       interval: 10s
@@ -39,6 +48,7 @@ services:
     environment:
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: "default"
+      TRACES_ROOT: /data/traces
     ports:
       - "8123:8123"   # HTTP
     ulimits:
@@ -46,7 +56,8 @@ services:
         soft: 262144
         hard: 262144
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
+      - /mnt/ironwolf4/traces/statevolumes/clickhouse:/var/lib/clickhouse
+      - /mnt/ironwolf4/traces:/data/traces:ro
     healthcheck:
       test: ["CMD", "bash", "-c", "wget -qO- http://localhost:8123/ping | grep -q 'Ok'"]
       interval: 10s
@@ -68,11 +79,13 @@ services:
     build: .
     environment:
       <<: *airflow-env
+      TRACES_ROOT: /data/traces
     command: bash -lc "airflow scheduler"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
+      - /mnt/ironwolf4/traces:/data/traces:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,6 +98,7 @@ services:
     build: .
     environment:
       <<: *airflow-env
+      TRACES_ROOT: /data/traces
     command: bash -lc "airflow webserver"
     ports:
       - "8080:8080"
@@ -92,6 +106,7 @@ services:
       - ./dags:/opt/airflow/dags
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
+      - /mnt/ironwolf4/traces:/data/traces:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -120,6 +135,3 @@ services:
       timeout: 5s
       retries: 8
 
-volumes:
-  postgres_data:
-  clickhouse_data:
