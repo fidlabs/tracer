@@ -23,6 +23,10 @@ x-airflow-env: &airflow-env
   R2_PREFIX: ${R2_PREFIX:-}
   R2_GLOB: ${R2_GLOB:-*.json.s2}
   
+  #Lotus API configuration
+  LOTUS_API_URL: ${LOTUS_API_URL}
+  LOTUS_AUTH_TOKEN: ${LOTUS_AUTH_TOKEN}
+  
   # Optional: build an Airflow "aws_r2" connection automatically (UI also works)
   AIRFLOW_CONN_AWS_R2: >-
     aws://?aws_access_key_id=${R2_ACCESS_KEY_ID}&aws_secret_access_key=${R2_SECRET_ACCESS_KEY}
@@ -35,6 +39,8 @@ services:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
     volumes:
       - /mnt/ironwolf4/traces/statevolumes/postgres:/var/lib/postgresql/data
     healthcheck:
@@ -83,6 +89,7 @@ services:
     command: bash -lc "airflow scheduler"
     volumes:
       - ./dags:/opt/airflow/dags
+      - ./plugins:/opt/airflow/plugins
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
       - /mnt/ironwolf4/traces:/data/traces:ro
@@ -104,6 +111,7 @@ services:
       - "8080:8080"
     volumes:
       - ./dags:/opt/airflow/dags
+      - ./plugins:/opt/airflow/plugins
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
       - /mnt/ironwolf4/traces:/data/traces:ro
