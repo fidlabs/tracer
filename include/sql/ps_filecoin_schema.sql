@@ -1,7 +1,8 @@
-create database filecoin;
-use filecoin;
+-- PostgreSQL schema for filecoin database
+-- Note: Connect to 'filecoin' database before running this script
+-- Or run: psql -U airflow -d filecoin -f ps_filecoin_schema.sql
 
-create table deals
+create table if not exists deals
 (
     id             serial
         constraint deals_id_pk
@@ -20,16 +21,16 @@ create table deals
     "sectorExpiry" integer
 );
 
-create index deals_dealid_index
+create index if not exists deals_dealid_index
     on deals ("dealId");
 
-create index deals_claimid_index
+create index if not exists deals_claimid_index
     on deals ("claimId");
 
-create index dealproposals_dealid_index
+create index if not exists dealproposals_dealid_index
     on deals ("dealId");
 
-create table verifier_allowance
+create table if not exists verifier_allowance
 (
     id           serial
         constraint verifier_allowance_id_pk
@@ -43,7 +44,7 @@ create table verifier_allowance
         unique ("msgCid", "verifierId", height)
 );
 
-create table verified_client_allowance
+create table if not exists verified_client_allowance
 (
     id           serial
         constraint verified_client_allowance_id_pk
@@ -58,7 +59,7 @@ create table verified_client_allowance
         unique ("verifierId", "clientId", "msgCid", height)
 );
 
-create table allocations
+create table if not exists allocations
 (
     "allocationId"            integer not null
         constraint dc_allocation_allocation_id_pk
@@ -73,7 +74,7 @@ create table allocations
     "contractImmediateCaller" integer
 );
 
-create table deal_proposals
+create table if not exists deal_proposals
 (
     id                     serial
         constraint dealproposals_id_pk
@@ -92,10 +93,10 @@ create table deal_proposals
     verified               boolean
 );
 
-create unique index deal_proposals_dealid_index
+create unique index if not exists deal_proposals_dealid_index
     on deal_proposals ("dealId");
 
-create table sector_activations
+create table if not exists sector_activations
 (
     id                 serial
         constraint sector_activations_id_pk
@@ -107,10 +108,10 @@ create table sector_activations
 );
 
 
-create unique index sector_activations_dealid_index
+create unique index if not exists sector_activations_dealid_index
     on sector_activations ("dealId");
 
-create table meta_allocators
+create table if not exists meta_allocators
 (
     "addressId"     integer not null
         constraint meta_allocators_pk
@@ -120,7 +121,7 @@ create table meta_allocators
     "robustAddress" varchar
 );
 
-create table client_contracts
+create table if not exists client_contracts
 (
     "addressId"     integer not null
         constraint client_contracts_pk
@@ -130,7 +131,7 @@ create table client_contracts
     "robustAddress" varchar
 );
 
-create table actors
+create table if not exists actors
 (
     "addressId"  integer,
     address      varchar,

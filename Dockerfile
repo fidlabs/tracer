@@ -29,6 +29,10 @@ ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 ENV GOBIN=/usr/local/bin
 RUN /usr/local/go/bin/go install github.com/klauspost/compress/s2/cmd/...@v1.17.0
 
+# Install Rust toolchain (required for filecoin-ffi)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # Build and install filecoin-ffi
 RUN mkdir -p /opt/filecoin-ffi
 RUN git clone https://github.com/filecoin-project/filecoin-ffi.git /opt/filecoin-ffi
