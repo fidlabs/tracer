@@ -25,8 +25,8 @@ CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "4828609"))    # Starting file number (1-based)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))  # Number of files to process per run
+START_FROM = int(os.getenv("START_FROM", "877999"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 
@@ -526,7 +526,7 @@ with DAG(
         for obj in messagesToDecode:
             try:
                 actorName = find_actor_name(obj['msg']['To'])
-                if obj['msg']['ParamsCodec'] == 81:
+                if 'ParamsCodec' not in obj['msg'] or obj['msg']['ParamsCodec'] == 81:
                     decodeParametersCmd = [
                         "/opt/airflow/plugins/goExecutables/decode_params",
                         actorName,
