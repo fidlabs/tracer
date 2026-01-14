@@ -333,10 +333,7 @@ with DAG(
                 print(obj)
                 print("--------------------------------")
                 actorName = find_actor_name(obj['msg']['To'])
-                if 'ParamsCodec' not in obj['msg']:
-                    print(f"Skipping message without ParamsCodec: {obj['msg'].get('To', 'unknown')} method {obj['msg'].get('Method', 'unknown')}")
-                    decodedParams = None
-                elif obj['msg']['ParamsCodec'] == 81:
+                if 'ParamsCodec' not in obj['msg'] or obj['msg']['ParamsCodec'] == 81:
                     decodeParametersCmd = [
                         "/opt/airflow/plugins/goExecutables/decode_params",
                         actorName,
