@@ -87,7 +87,7 @@ create table deal_proposals
     "endEpoch"             integer,
     "clientCollateral"     numeric,
     "providerCollateral"   numeric,
-    "storagePricePerEpoch" integer,
+    "storagePricePerEpoch" numeric,
     label                  varchar,
     verified               boolean
 );

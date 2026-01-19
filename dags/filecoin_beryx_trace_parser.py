@@ -26,7 +26,7 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "877999"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "269897"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 
@@ -1081,7 +1081,7 @@ with DAG(
                             print(f"Warning: dealId {sectorActivation['dealId']} not found in deal proposals table.")
 
                     cur.executemany(
-                        "INSERT INTO public.deals (\"claimId\", \"clientId\", \"providerId\", \"sectorId\", \"dealId\", \"sectorExpiry\", \"pieceCid\", \"pieceSize\", \"termMin\", \"termMax\", \"termStart\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
+                        "INSERT INTO public.deals (\"claimId\", \"clientId\", \"providerId\", \"sectorId\", \"dealId\", \"sectorExpiry\", \"pieceCid\", \"pieceSize\", \"termMin\", \"termMax\", \"termStart\") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (\"dealId\") DO NOTHING;",
                         [
                             (
                                 0,
@@ -1101,7 +1101,7 @@ with DAG(
                     )
 
                     cur.executemany(
-                        "INSERT INTO public.sector_activations (\"dealId\", \"providerId\", \"activationHeight\", \"sectorNumber\") VALUES (%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
+                        "INSERT INTO public.sector_activations (\"dealId\", \"providerId\", \"activationHeight\", \"sectorNumber\") VALUES (%s,%s,%s,%s) ON CONFLICT (\"dealId\") DO NOTHING;",
                         [
                             (
                                 sectorActivation['dealId'],
