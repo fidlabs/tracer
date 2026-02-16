@@ -125,7 +125,6 @@ def process_trace_lines(traces_text: str, height: int) -> list[dict]:
                                 if verifregSubcall['Msg']['From'] == 'f07':
                                     verifRegUnivHookRct = verifregSubcall['MsgRct']
                         
-                        print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
                         matches.append({
                             "msg": msg,
                             "msgRct": msgRct,
@@ -328,10 +327,6 @@ with DAG(
         decodedResults = []
         for obj in messagesToDecode:
             try:
-                print("--------------------------------")
-                print("DECODING PARAMETERS")
-                print(obj)
-                print("--------------------------------")
                 actorName = find_actor_name(obj['msg']['To'])
                 if 'ParamsCodec' not in obj['msg'] or obj['msg']['ParamsCodec'] == 81:
                     decodeParametersCmd = [
@@ -593,7 +588,6 @@ with DAG(
 
                     # meta-allocator instance
                     if obj['msg']['To'] in metaAllocatorAddressDictionary and obj['msg']['Method'] == 3844450837:
-                        print(f"meta-allocator matched for message")
                         hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
                         with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
                             abi = json.load(f)
@@ -604,7 +598,6 @@ with DAG(
                         functionName = decodedContractFunction[0].fn_name
                         functionParams = decodedContractFunction[1]
 
-                        print(f"meta-allocator function: {functionName}, params: {functionParams}")
                         if functionName == "addAllowance":
                             address = str(functionParams.get('allocator'))
                             filNativeAddress = eth_address_to_fil_native(address)
@@ -619,7 +612,6 @@ with DAG(
 
                     # client contract instance
                     if obj['msg']['To'] in clientContractAddressDictionary and obj['msg']['Method'] == 3844450837:
-                        print(f"client contract matched for message")
                         hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
 
                         with open('/opt/airflow/plugins/abis/client-contract.json', 'r') as f:
@@ -631,7 +623,6 @@ with DAG(
                         functionName = decodedContractFunction[0].fn_name
                         functionParams = decodedContractFunction[1]
 
-                        print(f"client contract function: {functionName}, params: {functionParams}")
                         if functionName == "increaseAllowance":
                             address = str(functionParams.get('client'))
                             filNativeAddress = eth_address_to_fil_native(address)
