@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strconv"
 
@@ -29,8 +30,12 @@ func main() {
 	paramsBase64 := os.Args[3]
 	networkVersionArg := os.Args[4]
 
-	networkVersion, err := strconv.Atoi(networkVersionArg)
+	networkVersionF, err := strconv.ParseFloat(networkVersionArg, 64)
 	if err != nil {
+		log.Fatalf("Failed to parse network version '%s': %v", networkVersionArg, err)
+	}
+	networkVersion := int64(math.Floor(networkVersionF))
+	if networkVersion < 1 {
 		log.Fatalf("Failed to parse network version '%s': %v", networkVersionArg, err)
 	}
 

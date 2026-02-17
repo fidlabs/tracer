@@ -3,3 +3,5 @@ logs/
 .env
 
 dags/__pycache__/
+
+dags/utils/__pycache__/

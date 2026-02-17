@@ -1101,7 +1101,7 @@ with DAG(
                     )
 
                     cur.executemany(
-                        "INSERT INTO public.sector_activations (\"dealId\", \"providerId\", \"activationHeight\", \"sectorNumber\") VALUES (%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
+                        "INSERT INTO public.sector_activations (\"dealId\", \"providerId\", \"activationHeight\", \"sectorNumber\") VALUES (%s,%s,%s,%s) ON CONFLICT (\"dealId\") DO NOTHING;",
                         [
                             (
                                 sectorActivation['dealId'],

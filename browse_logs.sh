@@ -1,7 +1,7 @@
 #!/bin/bash
 # Helper script to browse Airflow logs easily
 
-LOGS_DIR="logs/dag_id=filecoin_r2_s2_to_clickhouse"
+LOGS_DIR="logs/trace_seq_beryx_parser"
 
 if [ ! -d "$LOGS_DIR" ]; then
     echo "Logs directory not found: $LOGS_DIR"

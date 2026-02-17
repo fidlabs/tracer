@@ -29,10 +29,34 @@ ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 ENV GOBIN=/usr/local/bin
 RUN /usr/local/go/bin/go install github.com/klauspost/compress/s2/cmd/...@v1.17.0
 
+# Install Rust toolchain (required for filecoin-ffi)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # Build and install filecoin-ffi
 RUN mkdir -p /opt/filecoin-ffi
 RUN git clone https://github.com/filecoin-project/filecoin-ffi.git /opt/filecoin-ffi
 RUN cd /opt/filecoin-ffi/ && make
+
+# Build decode_params Go executable for the correct architecture
+# This must happen as root before switching to airflow user
+RUN mkdir -p /opt/airflow/plugins/goExecutables
+COPY plugins/goExecutables/*.go /opt/airflow/plugins/goExecutables/
+COPY plugins/goExecutables/go.mod /opt/airflow/plugins/goExecutables/
+COPY plugins/goExecutables/go.sum /opt/airflow/plugins/goExecutables/
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+    amd64) GOARCH=amd64 ;; \
+    arm64) GOARCH=arm64 ;; \
+    *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \
+    cd /opt/airflow/plugins/goExecutables && \
+    /usr/local/go/bin/go mod tidy && \
+    /usr/local/go/bin/go mod download && \
+    GOOS=linux GOARCH=${GOARCH} /usr/local/go/bin/go build -o decode_params main.go && \
+    chmod +x decode_params && \
+    # Clean up source files to reduce image size (keep binary and go.sum for reference)
+    rm -f *.go go.mod
 
 # Ensure directories exist and have proper permissions
 RUN mkdir -p /opt/airflow/dags /opt/airflow/include /opt/airflow/logs && \
