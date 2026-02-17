@@ -63,11 +63,11 @@ def process_trace_lines(traces_text: str, height: int) -> list[dict]:
         if height > 3996816:
             with get_postgres_connection() as conn:
                 with conn.cursor() as cur:
-                    rows = cur.execute("select \"address\", \"addressId\" from meta_allocators")
+                    rows = cur.execute("select \"address\", \"addressId\" from public.meta_allocators")
                     for row in rows:
                         matchers.append([row[0], 3844450837])
                         matchers.append([row[1], 3844450837])
-                    rows = cur.execute("select \"address\", \"addressId\" from client_contracts")
+                    rows = cur.execute("select \"address\", \"addressId\" from public.client_contracts")
                     for row in rows:
                         matchers.append([row[0], 3844450837])
                         matchers.append([row[1], 3844450837])
@@ -125,7 +125,6 @@ def process_trace_lines(traces_text: str, height: int) -> list[dict]:
                                 if verifregSubcall['Msg']['From'] == 'f07':
                                     verifRegUnivHookRct = verifregSubcall['MsgRct']
                         
-                        print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
                         matches.append({
                             "msg": msg,
                             "msgRct": msgRct,
@@ -234,6 +233,11 @@ with DAG(
         print("=" * 60)
         ch_client = get_clickhouse_client()
         cursor = find_cursor(ch_client, START_SEQ)
+        # Enforce minimum cursor value to tipset where Fil+ started
+        MIN_CURSOR = 48714
+        if cursor < MIN_CURSOR:
+            print(f"⚠ Cursor {cursor} is below minimum {MIN_CURSOR}, adjusting to {MIN_CURSOR}")
+            cursor = MIN_CURSOR
         print(f"✓ Found cursor: {cursor}")
         print(f"✓ Next batch will start from seq {cursor + 1}")
         return cursor
@@ -328,10 +332,6 @@ with DAG(
         decodedResults = []
         for obj in messagesToDecode:
             try:
-                print("--------------------------------")
-                print("DECODING PARAMETERS")
-                print(obj)
-                print("--------------------------------")
                 actorName = find_actor_name(obj['msg']['To'])
                 if 'ParamsCodec' not in obj['msg'] or obj['msg']['ParamsCodec'] == 81:
                     decodeParametersCmd = [
@@ -401,12 +401,12 @@ with DAG(
                 metaAllocatorAddressDictionary = {}
                 clientContractAddressDictionary = {}
 
-                rows = cur.execute("select \"address\", \"addressId\", \"addressEth\" from meta_allocators")
+                rows = cur.execute("select \"address\", \"addressId\", \"addressEth\" from public.meta_allocators")
                 for row in rows:
                     metaAllocatorAddressDictionary[row[0]] = (row[2])
                     metaAllocatorAddressDictionary[row[1]] = (row[2])
 
-                rows = cur.execute("select \"address\", \"addressId\", \"addressEth\" from client_contracts")
+                rows = cur.execute("select \"address\", \"addressId\", \"addressEth\" from public.client_contracts")
                 for row in rows:
                     clientContractAddressDictionary[row[0]] = (row[2])
                     clientContractAddressDictionary[row[1]] = (row[2])
@@ -430,6 +430,9 @@ with DAG(
                     
                     # allocation
                     if (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 3621052141 and obj['msg']['From'] == "f05") or (obj['msg']['To'] == "f07" and obj['msg']['Method'] == 80475954):
+                        if not obj.get('verifRegUnivHookRct') or not obj['verifRegUnivHookRct'].get('Return'):
+                            print(f"Skipping allocation: missing verifRegUnivHookRct.Return for {obj['msg'].get('To', 'unknown')} method {obj['msg'].get('Method', 'unknown')}")
+                            continue
                         decodedReceipt = loads(base64.b64decode(obj['verifRegUnivHookRct']['Return']))
                         decodedParams = loads(base64.b64decode(obj['decodedParams']['OperatorData']))
                         clientId = ''
@@ -535,6 +538,9 @@ with DAG(
 
                     # proposal
                     if obj['msg']['To'] == "f05" and obj['msg']['Method'] == 4:
+                        if not obj.get('msgRct') or not obj['msgRct'].get('Return'):
+                            print(f"Skipping proposal: missing msgRct.Return for {obj['msg'].get('To', 'unknown')} method {obj['msg'].get('Method', 'unknown')}")
+                            continue
                         decodedReceipt = loads(base64.b64decode(obj['msgRct']['Return']))
                         proposalIndex = 0
                         for deal in obj['decodedParams']['Deals']:
@@ -568,7 +574,10 @@ with DAG(
                                 })
 
                     # sector activations
-                    if obj['msg']['To'] == "f010" and obj['msg']['Method'] == 3 and obj['msgRct']['ExitCode'] == 0 and (obj['msg']['From'] == "f03239905" or obj['msg']['From'] == "f03136590"):
+                    if obj['msg']['To'] == "f010" and obj['msg']['Method'] == 3 and obj.get('msgRct') and obj['msgRct'].get('ExitCode') == 0 and (obj['msg']['From'] == "f03239905" or obj['msg']['From'] == "f03136590"):
+                        if not obj['msgRct'].get('Return'):
+                            print(f"Skipping sector activation: missing msgRct.Return for {obj['msg'].get('To', 'unknown')} method {obj['msg'].get('Method', 'unknown')}")
+                            continue
                         decodedReceipt = loads(base64.b64decode(obj['msgRct']['Return']))
 
                         addressId = decodedReceipt[0]
@@ -593,7 +602,6 @@ with DAG(
 
                     # meta-allocator instance
                     if obj['msg']['To'] in metaAllocatorAddressDictionary and obj['msg']['Method'] == 3844450837:
-                        print(f"meta-allocator matched for message")
                         hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
                         with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
                             abi = json.load(f)
@@ -604,7 +612,6 @@ with DAG(
                         functionName = decodedContractFunction[0].fn_name
                         functionParams = decodedContractFunction[1]
 
-                        print(f"meta-allocator function: {functionName}, params: {functionParams}")
                         if functionName == "addAllowance":
                             address = str(functionParams.get('allocator'))
                             filNativeAddress = eth_address_to_fil_native(address)
@@ -619,7 +626,6 @@ with DAG(
 
                     # client contract instance
                     if obj['msg']['To'] in clientContractAddressDictionary and obj['msg']['Method'] == 3844450837:
-                        print(f"client contract matched for message")
                         hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
 
                         with open('/opt/airflow/plugins/abis/client-contract.json', 'r') as f:
@@ -631,7 +637,6 @@ with DAG(
                         functionName = decodedContractFunction[0].fn_name
                         functionParams = decodedContractFunction[1]
 
-                        print(f"client contract function: {functionName}, params: {functionParams}")
                         if functionName == "increaseAllowance":
                             address = str(functionParams.get('client'))
                             filNativeAddress = eth_address_to_fil_native(address)
@@ -895,7 +900,7 @@ with DAG(
                     )
 
                     cur.executemany(
-                        "INSERT INTO public.sector_activations (\"dealId\", \"providerId\", \"activationHeight\", \"sectorNumber\") VALUES (%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING;",
+                        "INSERT INTO public.sector_activations (\"dealId\", \"providerId\", \"activationHeight\", \"sectorNumber\") VALUES (%s,%s,%s,%s) ON CONFLICT (\"dealId\") DO NOTHING;",
                         [
                             (
                                 sectorActivation['dealId'],
@@ -936,6 +941,9 @@ with DAG(
                             for prop in batches['clientContracts']
                         ]
                     )
+
+                conn.commit()
+                print("✅ Successfully committed all database inserts")
 
     # Task flow
     init = init_postgres_schema()
