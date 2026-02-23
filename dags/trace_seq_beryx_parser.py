@@ -152,7 +152,7 @@ def process_trace_lines(traces_text: str, height: int) -> list[dict]:
 with DAG(
     dag_id="trace_seq_beryx_parser",
     start_date=datetime(2024, 1, 1),
-    schedule="*/3 * * * *",  # Run every 3 minutes
+    schedule="0 * * * *",  # Run every 60 minutes (at the top of each hour)
     catchup=False,
     max_active_runs=1,
     default_args={"owner": "data-eng", "retries": 1},
@@ -234,7 +234,7 @@ with DAG(
         ch_client = get_clickhouse_client()
         cursor = find_cursor(ch_client, START_SEQ)
         # Enforce minimum cursor value to tipset where Fil+ started
-        MIN_CURSOR = 48714
+        MIN_CURSOR = 5767169
         if cursor < MIN_CURSOR:
             print(f"⚠ Cursor {cursor} is below minimum {MIN_CURSOR}, adjusting to {MIN_CURSOR}")
             cursor = MIN_CURSOR
