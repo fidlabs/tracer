@@ -129,7 +129,7 @@ def process_trace_lines(traces_text: str, height: int) -> list[dict]:
                             "msg": msg,
                             "msgRct": msgRct,
                             "verifRegUnivHookRct": verifRegUnivHookRct,
-                            "parent": match["parent"],
+                            "parent": match["parent"]['Msg'] if match["parent"] else None,
                             "path": match["path"],
                             "baseMsg": {
                                 "To": trace_obj['Msg']['To'],
