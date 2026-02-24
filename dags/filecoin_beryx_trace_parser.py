@@ -26,7 +26,7 @@ CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "269897"))    # Starting file number (1-based)
+START_FROM = int(os.getenv("START_FROM", "5780300"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 
@@ -101,7 +101,6 @@ def normalize_address_to_id(address: str | int, addressDictionary, addressIdDict
         result = addressDictionary[address]   
 
     if result == 0:
-        print(f"Native address {result}")
         if isinstance(address, str) and (address.startswith("f1") or address.startswith("f3")):
             lotus_api_call_result = lotus_api_call(method="Filecoin.StateLookupID", params=[address, None])
             if (isinstance(lotus_api_call_result, str) and lotus_api_call_result.startswith("f0")):
@@ -118,9 +117,6 @@ def normalize_address_to_id(address: str | int, addressDictionary, addressIdDict
     return result, addressDictionary, addressIdDictionary
 
 def lotus_api_call(method: str, params: list):
-    print(f"Making Lotus API call: {method} with params: {params}")
-    print(f"Using LOTUS_API_URL: {LOTUS_API_URL}")
-    print(f"Using LOTUS_AUTH_TOKEN: {LOTUS_AUTH_TOKEN[:10]}...")  # Print only the beginning for security
     headers = {
         'Content-Type': 'application/json',
         'Authorization': LOTUS_AUTH_TOKEN
@@ -202,14 +198,14 @@ def find_actor_name(actor_address_id):
 
 def find_subcall (subcalls, destination, method):
     if subcalls is None or destination is None or method is None:
-        return None    
+        return None, None    
     for subcall in subcalls:
         msg_to = subcall['Msg']['To']
         msg_method = subcall['Msg']['Method']
         
         # Check if destination matches and method is in the list of methods
         if msg_to == destination and msg_method == method:
-            return subcall
+            return subcall, f"{destination}_{method}"
         
         # Recursively check nested subcalls if they exist
         if subcall.get('Subcalls'):
@@ -217,18 +213,18 @@ def find_subcall (subcalls, destination, method):
             if result is not None:
                 return result
     
-    return None
+    return None, None
 
 def find_subcall_and_parent(subcalls, destination, method,  parent=None):
     if subcalls is None or destination is None or method is None:
-        return None    
+        return None, None, None    
     for subcall in subcalls:
         msg_to = subcall['Msg']['To']
         msg_method = subcall['Msg']['Method']
         
         # Check if destination matches and method is in the list of methods
         if msg_to == destination and msg_method == method:
-            return subcall, parent
+            return subcall, parent, f"{destination}_{method}"
         
         # Recursively check nested subcalls if they exist
         if subcall.get('Subcalls'):
@@ -236,18 +232,18 @@ def find_subcall_and_parent(subcalls, destination, method,  parent=None):
             if result is not None:
                 return result
    
-    return None, None
+    return None, None, None
 
 def find_subcall_and_path(subcalls, destination, method, path=[]):
     if subcalls is None or destination is None or method is None:
-        return None    
+        return None, None, None   
     for subcall in subcalls:
         msg_to = subcall['Msg']['To']
         msg_method = subcall['Msg']['Method']
         
         # Check if destination matches and method is in the list of methods
         if msg_to == destination and msg_method == method:
-            return subcall, path
+            return subcall, path, f"{destination}_{method}"
         
         # Recursively check nested subcalls if they exist
         if subcall.get('Subcalls'):
@@ -255,7 +251,7 @@ def find_subcall_and_path(subcalls, destination, method, path=[]):
             if result is not None:
                 return result
    
-    return None, None
+    return None, None, None
 
 def strip_until_sentinel(data: bytes) -> bytes:
     """
@@ -390,7 +386,6 @@ with DAG(
         """
         Claim → stream/decode → insert → mark success/fail.
         """
-        print(obj)
         traces = obj["traces"]
         height = obj["height"]
 
@@ -441,9 +436,9 @@ with DAG(
                             methods = matcher[1:]  # Rest of the array are the methods
                             
                             for method in methods:
-                                subcall = find_subcall(subcalls=[trace_obj['ExecutionTrace']], destination=destination, method=method)
+                                subcall, reason = find_subcall(subcalls=[trace_obj['ExecutionTrace']], destination=destination, method=method)
                                 if (subcall is not None):
-                                    subcalls.append({"subcall": subcall, "parent": None, "path": []})
+                                    subcalls.append({"subcall": subcall, "parent": None, "path": [], "reason": reason})
 
                         for matcher in matchersWithParents:
                             if len(matcher) < 2:
@@ -453,9 +448,12 @@ with DAG(
                             methods = matcher[1:]  # Rest of the array are the methods
                             
                             for method in methods:
-                                subcall, parent = find_subcall_and_parent(subcalls=[trace_obj['ExecutionTrace']], destination=destination, method=method, parent=None)
+                                subcall, parent,reason = find_subcall_and_parent(subcalls=[trace_obj['ExecutionTrace']], destination=destination, method=method, parent=None)
                                 if (subcall is not None):
-                                    subcalls.append({"subcall": subcall, "parent": parent, "path": []})
+                                    print(f"Matcher with parent: destination={destination}, method={method}, found subcall={subcall is not None}, parent={parent is not None}")
+                                    print(f"{trace_obj['MsgCid']['/']}")
+                                    print(f"{parent}")
+                                    subcalls.append({"subcall": subcall, "parent": parent, "path": [], "reason": reason})
 
                         for matcher in matchersWithPaths:
                             if len(matcher) < 2:
@@ -465,9 +463,9 @@ with DAG(
                             methods = matcher[1:]  # Rest of the array are the methods
                             
                             for method in methods:
-                                subcall, path = find_subcall_and_path(subcalls=[trace_obj['ExecutionTrace']], destination=destination, method=method, path=[]) 
+                                subcall, path, reason = find_subcall_and_path(subcalls=[trace_obj['ExecutionTrace']], destination=destination, method=method, path=[]) 
                                 if (subcall is not None):
-                                    subcalls.append({"subcall": subcall, "parent": None, "path": path})
+                                    subcalls.append({"subcall": subcall, "parent": None, "path": path, "reason": reason})
 
                         for match in subcalls:
                             if "subcall" in match:
@@ -475,17 +473,16 @@ with DAG(
                                 msgRct = match["subcall"]['MsgRct']
                                 verifRegUnivHookRct = []
                                 if (msg['To'] == "f07" and msg['Method'] == 3621052141 and msg['From'] == "f05") or (msg['To'] == "f07" and msg['Method'] == 80475954):
-                                    verifregSubcall = find_subcall(subcalls=match["subcall"]['Subcalls'], destination="f06", method=3726118371)
+                                    verifregSubcall, reason = find_subcall(subcalls=match["subcall"]['Subcalls'], destination="f06", method=3726118371)
                                     if verifregSubcall:
                                         if verifregSubcall['Msg']['From']=='f07':
                                             verifRegUnivHookRct= verifregSubcall['MsgRct']
 
-                                print(f"from: {msg['From']}, to: {msg['To']}, method: {msg['Method']}, params: {msg['Params']}")
                                 matches.append({
                                     "msg": msg, 
                                     "msgRct": msgRct,
                                     "verifRegUnivHookRct": verifRegUnivHookRct, 
-                                    "parent": match["parent"], 
+                                    "parent": match["parent"]["Msg"] if match["parent"] else None, 
                                     "path": match["path"],
                                     "baseMsg": {
                                         "To": trace_obj['Msg']['To'],
@@ -495,7 +492,8 @@ with DAG(
                                         "Nonce": trace_obj['Msg']['Nonce'],
                                         "MsgCid": trace_obj['MsgCid']["/"]
                                         }, 
-                                    "height": height
+                                    "height": height,
+                                    "reason": match["reason"]
                                 })
                             else:
                                 print(f"No matched subcall in trace {i+1}")
@@ -550,9 +548,12 @@ with DAG(
                 raise
 
             decodedParamsParent = None
-
+  
+            print(f"Parent params: {obj['reason']} {obj['parent']}, {obj['baseMsg']}")
             if obj['parent'] and 'Method' in obj['parent'] and 'Params' in obj['parent'] and (obj['parent']['Method'] == 35 or obj['parent']['Method'] == 34):
                 try:
+                    print(f"Decoding parent parameters for method {obj['parent']['Method']} at height {obj['height']}")
+                    
                     decodeParametersCmdParent = [
                         "/opt/airflow/plugins/goExecutables/decode_params",
                         "storageminer",
@@ -645,6 +646,9 @@ with DAG(
                         if obj['parent'] and 'Method' in obj['parent'] and obj['parent']['Method'] == 35:
                             sectors = obj['decodedParamsParent']['SectorUpdates']
 
+                        print(obj['baseMsg'])
+                        print(obj['parent'])
+                        print(f"Decoded parent params for claim: { obj['decodedParamsParent']}")
                         dealIds = {}
                         if sectors:
                             for sector in sectors:
@@ -786,7 +790,6 @@ with DAG(
 
                     # meta-allocator instance
                     if obj['msg']['To'] in metaAllocatorAddressDictionary and obj['msg']['Method'] == 3844450837:
-                        print(f"meta-allocator matched for message")
                         hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
                         with open('/opt/airflow/plugins/abis/meta-allocator.json', 'r') as f:
                             abi = json.load(f)
@@ -797,7 +800,6 @@ with DAG(
                         functionName = decodedContractFunction[0].fn_name
                         functionParams = decodedContractFunction[1]
 
-                        print(f"meta-allocator function: {functionName}, params: {functionParams}")
                         if functionName == "addAllowance":
                             address = str(functionParams.get('allocator'))
                             filNativeAddress = eth_address_to_fil_native(address)
@@ -814,7 +816,6 @@ with DAG(
                             
                     # client contract instance
                     if obj['msg']['To'] in clientContractAddressDictionary and obj['msg']['Method'] == 3844450837:
-                        print(f"client contract matched for message")
                         hexEthTxInput = '0x' + base64.b64decode(obj['decodedParams']).hex()
                        
                         with open('/opt/airflow/plugins/abis/client-contract.json', 'r') as f:
@@ -826,7 +827,6 @@ with DAG(
                         functionName = decodedContractFunction[0].fn_name
                         functionParams = decodedContractFunction[1]
 
-                        print(f"client contract function: {functionName}, params: {functionParams}")
                         if functionName == "increaseAllowance":
                             address = str(functionParams.get('client'))
                             filNativeAddress = eth_address_to_fil_native(address)
