@@ -25,8 +25,8 @@ CH_HOST = os.getenv("CH_HOST", "clickhouse")
 CH_PORT = int(os.getenv("CH_PORT", "8123"))
 
 # Processing configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))  # Number of files to process per run
-START_FROM = int(os.getenv("START_FROM", "5780300"))    # Starting file number (1-based)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))  # Number of files to process per run
+START_FROM = int(os.getenv("START_FROM", "5777950"))    # Starting file number (1-based)
 MAX_MISSING_WAIT = int(os.getenv("MAX_MISSING_WAIT", "10"))  # Max consecutive missing files before stopping
 
 
@@ -662,7 +662,7 @@ with DAG(
                                     for piece in sector['Pieces']:
                                         if piece['Notify'] is not None:
                                             for notifyItem in piece['Notify']:
-                                                if notifyItem['Address'] == 'f05':
+                                                if notifyItem['Address'] == 'f05' and "VerifiedAllocationKey" in piece and piece['VerifiedAllocationKey'] is not None:
                                                     dealIds[f"{piece['VerifiedAllocationKey']['Client']}_{piece['VerifiedAllocationKey']['ID']}_{sectorNumber}"] = loads(base64.b64decode(notifyItem['Payload']))
 
                         for sector in obj['decodedParams']['Sectors']:
