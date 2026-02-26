@@ -484,7 +484,7 @@ with DAG(
                                     for piece in sector['Pieces']:
                                         if piece['Notify'] is not None:
                                             for notifyItem in piece['Notify']:
-                                                if notifyItem['Address'] == 'f05':
+                                                if notifyItem['Address'] == 'f05' and "VerifiedAllocationKey" in piece and piece['VerifiedAllocationKey'] is not None:
                                                     dealIds[f"{piece['VerifiedAllocationKey']['Client']}_{piece['VerifiedAllocationKey']['ID']}_{sectorNumber}"] = loads(base64.b64decode(notifyItem['Payload']))
 
                         for sector in obj['decodedParams']['Sectors']:
