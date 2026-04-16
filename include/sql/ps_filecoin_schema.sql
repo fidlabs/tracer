@@ -54,6 +54,7 @@ create table verified_client_allowance
     allowance    numeric,
     "msgCid"     varchar,
     type         varchar,
+    "dcSource"   varchar,
     constraint verified_client_allowance_pk
         unique ("verifierId", "clientId", "msgCid", height)
 );
@@ -135,4 +136,36 @@ create table actors
     "addressId"  integer,
     address      varchar,
     "addressEth" varchar
+);
+
+create table virtual_verifier_allowance
+(
+    id           serial
+        constraint virtual_verifier_allowance_id_pk
+            primary key,
+    "verifierId" varchar,
+    "verifierAddressEth" varchar,
+    height       integer,
+    allowance    numeric,
+    "msgCid"     varchar,
+    type         varchar,
+    "dcSource"   varchar,
+    constraint virtual_verifier_allowance_pk
+        unique ("msgCid", "verifierId", height)
+);
+
+create table virtual_verified_client_allowance
+(
+    id           serial
+        constraint virtual_verified_client_allowance_id_pk
+            primary key,
+    "clientId"   varchar,
+    "verifierId" varchar,
+    height       integer,
+    allowance    numeric,
+    "msgCid"     varchar,
+    type         varchar,
+    "dcSource"   varchar,
+    constraint virtual_verified_client_allowance_pk
+        unique ("verifierId", "clientId", "msgCid", height)
 );
