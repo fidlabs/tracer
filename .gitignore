@@ -1,5 +1,6 @@
 
 logs/
+traces/
 .env
 
 dags/__pycache__/

@@ -411,15 +411,17 @@ with DAG(
                     clientContractAddressDictionary[row[0]] = (row[2])
                     clientContractAddressDictionary[row[1]] = (row[2])
 
-                batches = {
-                    "allocations": [],
-                    "claims": [],
-                    "verifierAllowances": [],
-                    "clientAllowances": [],
-                    "proposals": [],
-                    "sectorActivations": [],
-                    "metaAllocators": [],
-                    "clientContracts": []
+                batches = { 
+                    "allocations": [], 
+                    "claims": [], 
+                    "verifierAllowances": [], 
+                    "clientAllowances": [], 
+                    "proposals": [], 
+                    "sectorActivations": [], 
+                    "metaAllocators": [], 
+                    "clientContracts": [], 
+                    "virtualVerifierAllowances": [], 
+                    "virtualClientAllowances": [] 
                 }
                 
                 for obj in decodedResults:
@@ -511,7 +513,8 @@ with DAG(
                             "allowance": obj['decodedParams']['Allowance'],
                             "msgCid": obj['baseMsg']['MsgCid'],
                             "height": obj['height'],
-                            "type": "direct"
+                            "type": "direct",
+                            "dcSource": 'f080'
                         })
 
                     # create client meta-allocator
@@ -522,7 +525,8 @@ with DAG(
                             "verifierId": obj['msg']['From'],
                             "height": obj['height'],
                             "msgCid": obj['baseMsg']['MsgCid'],
-                            "type": "meta-allocator"
+                            "type": "meta-allocator",
+                            "dcSource": obj['baseMsg']['From'],
                         })
 
                     # create client
@@ -533,7 +537,8 @@ with DAG(
                             "verifierId": obj['msg']['From'],
                             "height": obj['height'],
                             "msgCid": obj['baseMsg']['MsgCid'],
-                            "type": "direct"
+                            "type": "direct",
+                            "dcSource": obj['msg']['From']
                         })
 
                     # proposal
@@ -573,7 +578,7 @@ with DAG(
                                     'sectorNumber': int(obj['decodedParams']['Number'])
                                 })
 
-                    # sector activations
+                     # factory pattern for client contract and meta-allocator creation (both go through the same method, but different actors)
                     if obj['msg']['To'] == "f010" and obj['msg']['Method'] == 3 and obj.get('msgRct') and obj['msgRct'].get('ExitCode') == 0 and (obj['msg']['From'] == "f03239905" or obj['msg']['From'] == "f03136590"):
                         if not obj['msgRct'].get('Return'):
                             print(f"Skipping sector activation: missing msgRct.Return for {obj['msg'].get('To', 'unknown')} method {obj['msg'].get('Method', 'unknown')}")
@@ -616,13 +621,17 @@ with DAG(
                             address = str(functionParams.get('allocator'))
                             filNativeAddress = eth_address_to_fil_native(address)
 
-                            batches['verifierAllowances'].append({
-                                "verifierId": filNativeAddress,
-                                "allowance": functionParams.get('amount'),
-                                "msgCid": obj['baseMsg']['MsgCid'],
-                                "height": obj['height'],
-                                "type": "meta-allocator"
-                            })
+                            batches['virtualVerifierAllowances'].append(
+                                {
+                                    "verifierId": filNativeAddress,
+                                    "verifierAddressEth": address,
+                                    "allowance": functionParams.get('amount'),
+                                    "msgCid": obj['baseMsg']['MsgCid'],
+                                    "height": obj['height'],
+                                    "type": "meta-allocator",
+                                    "dcSource": obj['msg']['To']
+                                }
+                            )
 
                     # client contract instance
                     if obj['msg']['To'] in clientContractAddressDictionary and obj['msg']['Method'] == 3844450837:
@@ -641,14 +650,17 @@ with DAG(
                             address = str(functionParams.get('client'))
                             filNativeAddress = eth_address_to_fil_native(address)
 
-                            batches['clientAllowances'].append({
-                                "clientId": filNativeAddress,
-                                "allowance": functionParams.get('amount'),
-                                "verifierId": obj['msg']['To'],
-                                "msgCid": obj['baseMsg']['MsgCid'],
-                                "height": obj['height'],
-                                "type": "contract"
-                            })
+                            batches['virtualClientAllowances'].append(
+                                {
+                                    "clientId": filNativeAddress,
+                                    "allowance": functionParams.get('amount'),
+                                    "verifierId": obj['msg']['To'],
+                                    "msgCid": obj['baseMsg']['MsgCid'],
+                                    "height": obj['height'],
+                                    "type": "contract",
+                                    "dcSource": obj['msg']['To']
+                                }
+                            )
 
                 # Normalize addresses
                 addressesToSearchInDb = []
@@ -783,23 +795,42 @@ with DAG(
                 # Insert verifier allowances
                 if batches['verifierAllowances']:
                     cur.executemany(
-                        "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"msgCid\", \"height\", \"type\") VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO public.verifier_allowance (\"verifierId\", allowance, \"msgCid\", \"height\", \"type\", \"dcSource\") VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
                                 va['verifierId'],
                                 va['allowance'],
                                 va['msgCid'],
                                 va['height'],
-                                va['type']
+                                va['type'],
+                                va['dcSource']
                             )
                             for va in batches['verifierAllowances']
                         ]
                     )
 
+                # Insert virtual verifier allowances
+                if batches['virtualVerifierAllowances']:
+                    cur.executemany(
+                        "INSERT INTO public.virtual_verifier_allowance (\"verifierId\", \"verifierAddressEth\", allowance, \"msgCid\", \"height\", \"type\", \"dcSource\") VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        [
+                            (
+                                va['verifierId'],
+                                va['verifierAddressEth'],
+                                va['allowance'],
+                                va['msgCid'],
+                                va['height'],
+                                va['type'],
+                                va['dcSource']
+                            )
+                            for va in batches['virtualVerifierAllowances']
+                        ]
+                    )
+    
                 # Insert client allowances
                 if batches['clientAllowances']:
                     cur.executemany(
-                        "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"msgCid\", \"height\", \"type\") VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO public.verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"msgCid\", \"height\", \"type\", \"dcSource\") VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
                         [
                             (
                                 ca['verifierId'],
@@ -807,9 +838,28 @@ with DAG(
                                 ca['allowance'],
                                 ca['msgCid'],
                                 ca['height'],
-                                ca['type']
+                                ca['type'],
+                                ca['dcSource']
                             )
                             for ca in batches['clientAllowances']
+                        ]
+                    )
+
+                # Insert virtual client allowances
+                if batches['virtualClientAllowances']:
+                    cur.executemany(
+                        "INSERT INTO public.virtual_verified_client_allowance (\"verifierId\", \"clientId\", allowance, \"msgCid\", \"height\", \"type\", \"dcSource\") VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING;",
+                        [
+                            (
+                                ca['verifierId'],
+                                ca['clientId'],
+                                ca['allowance'],
+                                ca['msgCid'],
+                                ca['height'],
+                                ca['type'],
+                                ca['dcSource']
+                            )
+                            for ca in batches['virtualClientAllowances']
                         ]
                     )
 

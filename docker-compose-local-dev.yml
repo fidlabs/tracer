@@ -1,0 +1,136 @@
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+  AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+  AIRFLOW__LOGGING__LOG_FILENAME_TEMPLATE: "{{ ti.dag_id }}/{{ ti.run_id }}/{{ ti.task_id }}/{{ ti.map_index }}/{{ ti.try_number }}.log"
+  
+  # R2 (S3-compatible) configuration for DAG
+  R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+  R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+  R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+  R2_BUCKET: ${R2_BUCKET}
+  R2_PREFIX: ${R2_PREFIX:-}
+  R2_GLOB: ${R2_GLOB:-*.json.s2}
+  
+  #Lotus API configuration
+  LOTUS_API_URL: ${LOTUS_API_URL}
+  LOTUS_AUTH_TOKEN: ${LOTUS_AUTH_TOKEN}
+  
+  # Optional: build an Airflow "aws_r2" connection automatically (UI also works)
+  AIRFLOW_CONN_AWS_R2: >-
+    aws://?aws_access_key_id=${R2_ACCESS_KEY_ID}&aws_secret_access_key=${R2_SECRET_ACCESS_KEY}
+    &region_name=auto&endpoint_url=https%3A%2F%2F${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: "default"
+    ports:
+      - "8123:8123"   # HTTP
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./traces:/data/traces:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "wget -qO- http://localhost:8123/ping | grep -q 'Ok'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airflow-init:
+    build: .
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+    command: bash -lc "airflow db init"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-scheduler:
+    build: .
+    environment:
+      <<: *airflow-env
+    command: bash -lc "airflow scheduler"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./plugins:/opt/airflow/plugins
+      - ./include:/opt/airflow/include
+      - ./logs:/opt/airflow/logs
+      - ./traces:/data/traces:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+
+  airflow-webserver:
+    build: .
+    environment:
+      <<: *airflow-env
+    command: bash -lc "airflow webserver"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./plugins:/opt/airflow/plugins
+      - ./include:/opt/airflow/include
+      - ./logs:/opt/airflow/logs
+      - ./traces:/data/traces:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+
+  # Optional specialized index (OpenSearch) — enable with `--profile elastic`
+  opensearch:
+    profiles: ["elastic"]
+    image: opensearchproject/opensearch:2.13.0
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s localhost:9200 >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+
+volumes:
+  postgres_data:
+  clickhouse_data:
