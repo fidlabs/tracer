@@ -33,8 +33,10 @@ AIRFLOW_ADMIN_PASSWORD=admin  # hard coded for local test only!
 
 First bring up the infrastructure services:
 ```bash
-docker compose up -d postgres clickhouse airflow-init
+docker compose up -d postgres postgres-airflow clickhouse airflow-init
 ```
+
+**Existing deployment:** migrate Airflow history off the shared postgres before starting the scheduler (see `scripts/migrate-airflow-metadata.sh`).
 
 Wait for initialization to complete, then start Airflow services:
 ```bash

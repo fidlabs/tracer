@@ -6,7 +6,13 @@ x-airflow-env: &airflow-env
   # Shared secret key so webserver/scheduler/triggerer can authenticate log and API calls
   # Any sufficiently random string is fine for local/dev.
   AIRFLOW__WEBSERVER__SECRET_KEY: "super-secret-local-key-change-me"
-  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
+  # Application DB (filecoin traces / beryx tables) — not Airflow metadata
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: filecoin
+  POSTGRES_USER: airflow
+  POSTGRES_PASSWORD: airflow
   AIRFLOW__LOGGING__LOG_FILENAME_TEMPLATE: "{{ ti.dag_id }}/{{ ti.run_id }}/{{ ti.task_id }}/{{ ti.map_index }}/{{ ti.try_number }}.log"
   # Use local filesystem for logs (both scheduler and webserver have logs volume mounted)
   AIRFLOW__LOGGING__REMOTE_LOGGING: "False"
@@ -33,6 +39,22 @@ x-airflow-env: &airflow-env
     &region_name=auto&endpoint_url=https%3A%2F%2F${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
 
 services:
+  # Airflow metadata only (DAG runs, task state, connections, etc.)
+  postgres-airflow:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - /mnt/ironwolf4/traces/statevolumes/postgres-airflow:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Application data (filecoin DB). Legacy deployments may still have an unused airflow DB here.
   postgres:
     image: postgres:15
     environment:
@@ -76,9 +98,9 @@ services:
       <<: *airflow-env
       _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
       _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
-    command: bash -lc "airflow db init"
+    command: bash -lc "airflow db migrate"
     depends_on:
-      postgres:
+      postgres-airflow:
         condition: service_healthy
 
   airflow-scheduler:
@@ -94,6 +116,8 @@ services:
       - ./logs:/opt/airflow/logs
       - /mnt/ironwolf4/traces:/data/traces:ro
     depends_on:
+      postgres-airflow:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       airflow-init:
@@ -116,6 +140,8 @@ services:
       - ./logs:/opt/airflow/logs
       - /mnt/ironwolf4/traces:/data/traces:ro
     depends_on:
+      postgres-airflow:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       airflow-init:

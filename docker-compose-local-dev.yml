@@ -3,7 +3,12 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__LOAD_EXAMPLES: "False"
   AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
   AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
-  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: filecoin
+  POSTGRES_USER: airflow
+  POSTGRES_PASSWORD: airflow
   AIRFLOW__LOGGING__LOG_FILENAME_TEMPLATE: "{{ ti.dag_id }}/{{ ti.run_id }}/{{ ti.task_id }}/{{ ti.map_index }}/{{ ti.try_number }}.log"
   
   # R2 (S3-compatible) configuration for DAG
@@ -24,6 +29,20 @@ x-airflow-env: &airflow-env
     &region_name=auto&endpoint_url=https%3A%2F%2F${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
 
 services:
+  postgres-airflow:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_airflow_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   postgres:
     image: postgres:15
     environment:
@@ -66,9 +85,9 @@ services:
       <<: *airflow-env
       _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
       _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
-    command: bash -lc "airflow db init"
+    command: bash -lc "airflow db migrate"
     depends_on:
-      postgres:
+      postgres-airflow:
         condition: service_healthy
 
   airflow-scheduler:
@@ -83,6 +102,8 @@ services:
       - ./logs:/opt/airflow/logs
       - ./traces:/data/traces:ro
     depends_on:
+      postgres-airflow:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       airflow-init:
@@ -104,6 +125,8 @@ services:
       - ./logs:/opt/airflow/logs
       - ./traces:/data/traces:ro
     depends_on:
+      postgres-airflow:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       airflow-init:
@@ -132,5 +155,6 @@ services:
       retries: 8
 
 volumes:
+  postgres_airflow_data:
   postgres_data:
   clickhouse_data:
