@@ -68,7 +68,8 @@ ch_query() {
 }
 
 pg_query() {
-  dc exec -T postgres psql -U airflow -d filecoin -v ON_ERROR_STOP=1 "$@"
+  # psql in the postgres:15 image does not support --query; read SQL from stdin.
+  dc exec -T postgres psql -U airflow -d filecoin -v ON_ERROR_STOP=1
 }
 
 confirm() {
@@ -118,8 +119,8 @@ ORDER BY status;
 if [[ "${SKIP_POSTGRES}" -eq 0 ]]; then
   echo ""
   echo "=== Postgres inspection (rows that would be deleted) ==="
-  pg_query --query "
-SELECT 'deals' AS tbl, count(*)::bigint AS cnt FROM public.deals WHERE \"termStart\" > ${CURSOR_SEQ}
+  pg_query <<SQL
+SELECT 'deals' AS tbl, count(*)::bigint AS cnt FROM public.deals WHERE "termStart" > ${CURSOR_SEQ}
 UNION ALL
 SELECT 'verifier_allowance', count(*) FROM public.verifier_allowance WHERE height > ${CURSOR_SEQ}
 UNION ALL
@@ -129,8 +130,8 @@ SELECT 'virtual_verifier_allowance', count(*) FROM public.virtual_verifier_allow
 UNION ALL
 SELECT 'virtual_verified_client_allowance', count(*) FROM public.virtual_verified_client_allowance WHERE height > ${CURSOR_SEQ}
 UNION ALL
-SELECT 'sector_activations', count(*) FROM public.sector_activations WHERE \"activationHeight\" > ${CURSOR_SEQ};
-"
+SELECT 'sector_activations', count(*) FROM public.sector_activations WHERE "activationHeight" > ${CURSOR_SEQ};
+SQL
 fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
@@ -179,16 +180,16 @@ if [[ "${SKIP_POSTGRES}" -eq 0 ]]; then
   echo "Recommended: delete deals (not idempotent on re-run)."
   echo "Optional: delete height-keyed allowance / sector_activation rows."
   if confirm "Delete Postgres rows with height/termStart > ${CURSOR_SEQ}?"; then
-    pg_query --query "
+    pg_query <<SQL
 BEGIN;
-DELETE FROM public.deals WHERE \"termStart\" > ${CURSOR_SEQ};
+DELETE FROM public.deals WHERE "termStart" > ${CURSOR_SEQ};
 DELETE FROM public.verifier_allowance WHERE height > ${CURSOR_SEQ};
 DELETE FROM public.virtual_verifier_allowance WHERE height > ${CURSOR_SEQ};
 DELETE FROM public.verified_client_allowance WHERE height > ${CURSOR_SEQ};
 DELETE FROM public.virtual_verified_client_allowance WHERE height > ${CURSOR_SEQ};
-DELETE FROM public.sector_activations WHERE \"activationHeight\" > ${CURSOR_SEQ};
+DELETE FROM public.sector_activations WHERE "activationHeight" > ${CURSOR_SEQ};
 COMMIT;
-"
+SQL
     echo "Postgres cleanup committed (allocations left unchanged — ON CONFLICT safe)."
   else
     echo "Skipped Postgres cleanup."

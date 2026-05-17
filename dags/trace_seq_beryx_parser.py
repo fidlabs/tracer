@@ -152,7 +152,7 @@ def process_trace_lines(traces_text: str, height: int) -> list[dict]:
 with DAG(
     dag_id="trace_seq_beryx_parser",
     start_date=datetime(2024, 1, 1),
-    schedule="0 * * * *",  # Run every 60 minutes (at the top of each hour)
+    schedule="*/30 * * * *",  # Run every 30 minutes
     catchup=False,
     max_active_runs=1,
     max_active_tasks=8,
