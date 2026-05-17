@@ -38,6 +38,8 @@ docker compose up -d postgres postgres-airflow clickhouse airflow-init
 
 **Existing deployment:** migrate Airflow history off the shared postgres before starting the scheduler (see `scripts/migrate-airflow-metadata.sh`).
 
+To reprocess from a given tipset after an outage, reset load state with `scripts/reset-cursor.sh` (see script header for usage).
+
 Wait for initialization to complete, then start Airflow services:
 ```bash
 docker compose up -d airflow-scheduler airflow-webserver
