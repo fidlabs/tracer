@@ -3,8 +3,8 @@
 
 CH_HOST="${CH_HOST:-localhost}"
 CH_PORT="${CH_PORT:-8123}"
-CH_USER="${CH_USER:-default}"
-CH_PASS="${CH_PASS:-default}"
+CH_USER="${CLICKHOUSE_USER:-default}"
+CH_PASS="${CLICKHOUSE_PASSWORD:-default}"
 
 # If no query provided, show interactive help
 if [ -z "$1" ]; then

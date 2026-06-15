@@ -4,6 +4,11 @@ x-airflow-env: &airflow-env
   AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
   AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres/airflow
+  # The DAGs open their own Postgres + ClickHouse connections via dags/utils/db_utils.py,
+  # which read these env vars directly (not the SQLAlchemy conn string above).
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
   AIRFLOW__LOGGING__LOG_FILENAME_TEMPLATE: "{{ ti.dag_id }}/{{ ti.run_id }}/{{ ti.task_id }}/{{ ti.map_index }}/{{ ti.try_number }}.log"
   
   # R2 (S3-compatible) configuration for DAG

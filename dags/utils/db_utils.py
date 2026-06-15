@@ -9,8 +9,8 @@ def get_clickhouse_client(host: str = None, port: int = None, username: str = No
     return clickhouse_connect.get_client(
         host=host or os.getenv("CH_HOST", "clickhouse"),
         port=port or int(os.getenv("CH_PORT", "8123")),
-        username=username or os.getenv("CH_USER", "default"),
-        password=password or os.getenv("CH_PASSWORD", "default"),
+        username=username or os.getenv("CLICKHOUSE_USER", "default"),
+        password=password or os.getenv("CLICKHOUSE_PASSWORD", "default"),
     )
 
 

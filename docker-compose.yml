@@ -8,6 +8,12 @@ x-airflow-env: &airflow-env
   AIRFLOW__WEBSERVER__SECRET_KEY: "super-secret-local-key-change-me"
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres/airflow
   AIRFLOW__LOGGING__LOG_FILENAME_TEMPLATE: "{{ ti.dag_id }}/{{ ti.run_id }}/{{ ti.task_id }}/{{ ti.map_index }}/{{ ti.try_number }}.log"
+  # The DAGs open their own Postgres + ClickHouse connections via dags/utils/db_utils.py,
+  # which read these env vars directly (not the SQLAlchemy conn string above). USER/HOST/
+  # PORT/DB fall back to correct defaults in db_utils; only the passwords must be passed.
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
   # Use local filesystem for logs (both scheduler and webserver have logs volume mounted)
   AIRFLOW__LOGGING__REMOTE_LOGGING: "False"
   AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: ""
