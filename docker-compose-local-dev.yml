@@ -3,7 +3,7 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__LOAD_EXAMPLES: "False"
   AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
   AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
-  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres/airflow
   AIRFLOW__LOGGING__LOG_FILENAME_TEMPLATE: "{{ ti.dag_id }}/{{ ti.run_id }}/{{ ti.task_id }}/{{ ti.map_index }}/{{ ti.try_number }}.log"
   
   # R2 (S3-compatible) configuration for DAG
@@ -28,10 +28,10 @@ services:
     image: postgres:15
     environment:
       POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: airflow
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -44,9 +44,9 @@ services:
     image: clickhouse/clickhouse-server:24.8
     environment:
       CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: "default"
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
     ports:
-      - "8123:8123"   # HTTP
+      - "127.0.0.1:8123:8123"   # HTTP, loopback-only
     ulimits:
       nofile:
         soft: 262144
@@ -96,7 +96,7 @@ services:
       <<: *airflow-env
     command: bash -lc "airflow webserver"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./dags:/opt/airflow/dags
       - ./plugins:/opt/airflow/plugins
@@ -120,7 +120,7 @@ services:
       - plugins.security.disabled=true
       - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
     ports:
-      - "9200:9200"
+      - "127.0.0.1:9200:9200"
     ulimits:
       memlock:
         soft: -1
