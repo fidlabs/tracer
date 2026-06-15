@@ -155,6 +155,7 @@ with DAG(
     schedule="0 * * * *",  # Run every 60 minutes (at the top of each hour)
     catchup=False,
     max_active_runs=1,
+    max_active_tasks=8,
     default_args={"owner": "data-eng", "retries": 1},
     tags=["filecoin", "s2", "postgres", "seq", "local", "beryx"]
 ) as dag:

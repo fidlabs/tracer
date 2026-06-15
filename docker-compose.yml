@@ -90,7 +90,7 @@ services:
     command: bash -lc "airflow scheduler"
     volumes:
       - ./dags:/opt/airflow/dags
-      - ./plugins:/opt/airflow/plugins
+      - ./plugins/abis:/opt/airflow/plugins/abis:ro
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
       - /mnt/ironwolf4/traces:/data/traces:ro
@@ -112,7 +112,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - ./dags:/opt/airflow/dags
-      - ./plugins:/opt/airflow/plugins
+      - ./plugins/abis:/opt/airflow/plugins/abis:ro
       - ./include:/opt/airflow/include
       - ./logs:/opt/airflow/logs
       - /mnt/ironwolf4/traces:/data/traces:ro
