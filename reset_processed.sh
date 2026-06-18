@@ -6,8 +6,8 @@ set -e
 # Default ClickHouse connection
 CH_HOST="${CH_HOST:-localhost}"
 CH_PORT="${CH_PORT:-8123}"
-CH_USER="${CH_USER:-default}"
-CH_PASS="${CH_PASS:-default}"
+CH_USER="${CLICKHOUSE_USER:-default}"
+CH_PASS="${CLICKHOUSE_PASSWORD:-default}"
 
 # Function to execute ClickHouse query
 execute_query() {
