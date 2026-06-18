@@ -1,5 +1,8 @@
 """Trace processing utilities for subcall matching, address normalization, and decoding."""
 import os
+import time
+import random
+import logging
 import requests
 import psycopg
 from filecoin_address import delegated_from_eth_address
@@ -7,8 +10,37 @@ from cbor2 import CBORTag, loads
 from multiformats import CID
 
 
+log = logging.getLogger(__name__)
+
 LOTUS_API_URL = os.environ.get("LOTUS_API_URL")
 LOTUS_AUTH_TOKEN = os.environ.get("LOTUS_AUTH_TOKEN")
+
+# Resilience knobs for the (frequently flaky) Lotus/GLIF endpoint. All overridable
+# via env so they can be tuned without a code change / image rebuild.
+LOTUS_MAX_RETRIES = int(os.environ.get("LOTUS_MAX_RETRIES", "8"))
+LOTUS_BACKOFF_BASE = float(os.environ.get("LOTUS_BACKOFF_BASE", "1.0"))   # seconds
+LOTUS_BACKOFF_MAX = float(os.environ.get("LOTUS_BACKOFF_MAX", "60"))      # seconds, per-sleep cap
+LOTUS_CONNECT_TIMEOUT = float(os.environ.get("LOTUS_CONNECT_TIMEOUT", "10"))  # seconds
+LOTUS_READ_TIMEOUT = float(os.environ.get("LOTUS_READ_TIMEOUT", "60"))       # seconds
+
+# HTTP statuses worth retrying. Beyond the usual rate-limit + gateway/server errors,
+# this includes 400 and 404: while GLIF migrates its load-balancing infra it returns
+# those spuriously for perfectly valid requests, so here they are transient, not real
+# client errors. Override via LOTUS_RETRY_STATUS (comma-separated) to tighten this back
+# up once GLIF stabilises.
+_DEFAULT_RETRY_STATUS = "400,404,429,500,502,503,504"
+_RETRYABLE_STATUS = {
+    int(s) for s in os.environ.get("LOTUS_RETRY_STATUS", _DEFAULT_RETRY_STATUS).split(",") if s.strip()
+}
+# Transport-level exceptions worth retrying (connection drops, timeouts, partial reads).
+_RETRYABLE_EXC = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+# Reuse one connection pool across the many calls each job makes.
+_session = requests.Session()
 
 
 def eth_address_to_fil_native(address: str) -> str:
@@ -39,25 +71,70 @@ def address_to_id(address: str | int) -> int:
     return 0
 
 
+def _retry_sleep(attempt: int, retry_after: str | None) -> float:
+    """Exponential backoff with full jitter, honouring a Retry-After header if present."""
+    if retry_after:
+        try:
+            return min(float(retry_after), LOTUS_BACKOFF_MAX)
+        except ValueError:
+            pass  # ignore HTTP-date form; fall back to computed backoff
+    backoff = min(LOTUS_BACKOFF_BASE * (2 ** attempt), LOTUS_BACKOFF_MAX)
+    # Full jitter (random in [0, backoff]) spreads out the up-to-1024 parallel tasks
+    # so they don't stampede GLIF in lockstep the moment it recovers.
+    return random.uniform(0, backoff)
+
+
 def lotus_api_call(method: str, params: list):
-    """Make a Lotus API call."""
+    """Make a Lotus API call, retrying through transient GLIF/Lotus outages.
+
+    Retries connection errors, timeouts and 429/5xx responses with jittered
+    exponential backoff. Raises the last error only after exhausting retries.
+    """
     headers = {
         'Content-Type': 'application/json',
         'Authorization': LOTUS_AUTH_TOKEN
     }
-    
+
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": method,
         "params": params
     }
-    
-    response = requests.post(LOTUS_API_URL, headers=headers, json=payload)
-    response.raise_for_status()
-    
-    result = response.json()
-    return result.get('result')
+
+    last_exc = None
+    for attempt in range(LOTUS_MAX_RETRIES + 1):
+        retry_after = None
+        try:
+            response = _session.post(
+                LOTUS_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=(LOTUS_CONNECT_TIMEOUT, LOTUS_READ_TIMEOUT),
+            )
+            if response.status_code in _RETRYABLE_STATUS:
+                retry_after = response.headers.get("Retry-After")
+                last_exc = requests.exceptions.HTTPError(
+                    f"{response.status_code} from Lotus API", response=response
+                )
+            else:
+                response.raise_for_status()
+                return response.json().get('result')
+        except _RETRYABLE_EXC as e:
+            last_exc = e
+
+        # Out of attempts: surface the real underlying error to the caller.
+        if attempt >= LOTUS_MAX_RETRIES:
+            break
+
+        sleep_s = _retry_sleep(attempt, retry_after)
+        log.warning(
+            "Lotus call %s failed (%s); retry %d/%d in %.1fs",
+            method, last_exc, attempt + 1, LOTUS_MAX_RETRIES, sleep_s,
+        )
+        time.sleep(sleep_s)
+
+    raise last_exc
 
 
 def normalize_address_to_id(address: str | int, addressDictionary, addressIdDictionary) -> tuple[int, dict, dict]:
