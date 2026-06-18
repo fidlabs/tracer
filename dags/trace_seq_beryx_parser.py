@@ -6,7 +6,7 @@ import subprocess
 import json
 import base64
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.decorators import task
 import psycopg
@@ -390,11 +390,22 @@ with DAG(
             })
         return decodedResults
 
-    @task
+    # output_results is the only task that calls GLIF (via normalize_address_to_id),
+    # so it gets a generous, backed-off retry policy of its own. Because the task is
+    # dynamically mapped, a retry re-runs ONLY the failed map index — it re-reads that
+    # index's decoded data from XCom and does NOT redo the upstream parse/decode work.
+    # All inserts are ON CONFLICT DO NOTHING and the single commit is after the GLIF
+    # step, so retries are idempotent. Tunable via the values below.
+    @task(
+        retries=6,
+        retry_delay=timedelta(minutes=2),
+        retry_exponential_backoff=True,
+        max_retry_delay=timedelta(minutes=30),
+    )
     def output_results(decodedResults: list[dict]) -> None:
         """
         Insert results into PostgreSQL.
-        
+
         Same as beryx_parser's output_results task.
         """
         with get_postgres_connection() as conn:
