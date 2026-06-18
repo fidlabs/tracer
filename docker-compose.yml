@@ -49,7 +49,7 @@ services:
       # Loopback-only: reach it by VPN'ing into the host, not over the public internet.
       - "127.0.0.1:5432:5432"
     volumes:
-      - /mnt/ironwolf4/traces/statevolumes/postgres:/var/lib/postgresql/data
+      - /mnt/ironwolf4/traces/statevolumes/postgres-clean:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U airflow"]
       interval: 10s
