@@ -16,7 +16,7 @@ opensearch-py==2.6.0
 web3==7.14.0
 filecoin-address==0.1.2
 multiformats==0.3.1.post4
-cbor2==5.7.1
+cbor2==5.9.0
 
 # PostgreSQL
 psycopg[binary]
